@@ -97,9 +97,20 @@ func DefaultCache() CacheState {
 
 // Store owns the private application state directory.
 type Store struct {
-	directory string
-	statePath string
-	mu        sync.Mutex
+	directory           string
+	statePath           string
+	mu                  sync.Mutex
+	createTemporary     func(string, string) (*os.File, error)
+	syncFile            func(*os.File) error
+	rename              func(string, string) error
+	syncDirectory       func(string) error
+	durabilityConfirmed bool
+}
+
+// WriteResult describes a logically committed state replacement.
+type WriteResult struct {
+	DurabilityConfirmed bool
+	DurabilityWarning   error
 }
 
 // NewStore opens or creates a private state directory.
@@ -114,8 +125,13 @@ func NewStore(directory string) (*Store, error) {
 		return nil, fmt.Errorf("protect state directory: %w", err)
 	}
 	return &Store{
-		directory: directory,
-		statePath: filepath.Join(directory, "state.json"),
+		directory:           directory,
+		statePath:           filepath.Join(directory, "state.json"),
+		createTemporary:     os.CreateTemp,
+		syncFile:            func(file *os.File) error { return file.Sync() },
+		rename:              os.Rename,
+		syncDirectory:       syncDirectory,
+		durabilityConfirmed: true,
 	}, nil
 }
 
@@ -127,13 +143,13 @@ func (s *Store) Load() (State, error) {
 }
 
 // Save atomically replaces initialized state.
-func (s *Store) Save(value State) error {
+func (s *Store) Save(value State) (WriteResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, err := os.Stat(s.statePath); errors.Is(err, os.ErrNotExist) {
-		return ErrNotInitialized
+		return WriteResult{}, ErrNotInitialized
 	} else if err != nil {
-		return err
+		return WriteResult{}, err
 	}
 	return s.writeStateLocked(value)
 }
@@ -141,18 +157,38 @@ func (s *Store) Save(value State) error {
 // CommitInitial creates the state for the first successful initialization.
 // The state-file existence check and write are serialized so concurrent setup
 // submissions cannot both initialize the service.
-func (s *Store) CommitInitial(value State) error {
+func (s *Store) CommitInitial(value State) (WriteResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, err := os.Stat(s.statePath); err == nil {
-		return ErrAlreadyInitialized
+		return WriteResult{}, ErrAlreadyInitialized
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
+		return WriteResult{}, err
 	}
-	if err := s.writeStateLocked(value); err != nil {
-		return err
-	}
-	return nil
+	return s.writeStateLocked(value)
+}
+
+// DurabilityConfirmed reports whether the most recent committed write completed directory sync.
+func (s *Store) DurabilityConfirmed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.durabilityConfirmed
+}
+
+// SyncDirectoryForTest injects directory synchronization behavior for tests in
+// other internal packages.
+func (s *Store) SyncDirectoryForTest(sync func(string) error) {
+	s.mu.Lock()
+	s.syncDirectory = sync
+	s.mu.Unlock()
+}
+
+// RenameForTest injects the atomic replacement operation for tests in other
+// internal packages.
+func (s *Store) RenameForTest(rename func(string, string) error) {
+	s.mu.Lock()
+	s.rename = rename
+	s.mu.Unlock()
 }
 
 func (s *Store) loadLocked() (State, error) {
@@ -184,9 +220,9 @@ func (s *Store) loadLocked() (State, error) {
 	return value, nil
 }
 
-func (s *Store) writeStateLocked(value State) error {
+func (s *Store) writeStateLocked(value State) (WriteResult, error) {
 	if value.SchemaVersion != SchemaVersion {
-		return fmt.Errorf("state schema version must be %d", SchemaVersion)
+		return WriteResult{}, fmt.Errorf("state schema version must be %d", SchemaVersion)
 	}
 	if value.UpdatedAt.IsZero() {
 		value.UpdatedAt = time.Now().UTC()
@@ -194,19 +230,19 @@ func (s *Store) writeStateLocked(value State) error {
 	return s.atomicWrite(s.statePath, value)
 }
 
-func (s *Store) atomicWrite(path string, value any) error {
+func (s *Store) atomicWrite(path string, value any) (WriteResult, error) {
 	var contents bytes.Buffer
 	encoder := json.NewEncoder(&contents)
 	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(value); err != nil {
-		return err
+		return WriteResult{}, err
 	}
 	if contents.Len() > maximumSize {
-		return errors.New("state exceeds 1 MiB")
+		return WriteResult{}, errors.New("state exceeds 1 MiB")
 	}
-	temporary, err := os.CreateTemp(s.directory, ".mt-server-*")
+	temporary, err := s.createTemporary(s.directory, ".mt-server-*")
 	if err != nil {
-		return fmt.Errorf("create temporary state: %w", err)
+		return WriteResult{}, fmt.Errorf("create temporary state: %w", err)
 	}
 	temporaryPath := temporary.Name()
 	removeTemporary := true
@@ -217,22 +253,27 @@ func (s *Store) atomicWrite(path string, value any) error {
 		}
 	}()
 	if err := temporary.Chmod(0o600); err != nil {
-		return err
+		return WriteResult{}, err
 	}
 	if _, err := temporary.Write(contents.Bytes()); err != nil {
-		return err
+		return WriteResult{}, err
 	}
-	if err := temporary.Sync(); err != nil {
-		return err
+	if err := s.syncFile(temporary); err != nil {
+		return WriteResult{}, err
 	}
 	if err := temporary.Close(); err != nil {
-		return err
+		return WriteResult{}, err
 	}
-	if err := os.Rename(temporaryPath, path); err != nil {
-		return fmt.Errorf("replace state: %w", err)
+	if err := s.rename(temporaryPath, path); err != nil {
+		return WriteResult{}, fmt.Errorf("replace state: %w", err)
 	}
 	removeTemporary = false
-	return syncDirectory(s.directory)
+	if err := s.syncDirectory(s.directory); err != nil {
+		s.durabilityConfirmed = false
+		return WriteResult{DurabilityConfirmed: false, DurabilityWarning: err}, nil
+	}
+	s.durabilityConfirmed = true
+	return WriteResult{DurabilityConfirmed: true}, nil
 }
 
 func readBounded(path string) ([]byte, error) {

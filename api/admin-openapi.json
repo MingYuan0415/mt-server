@@ -9,12 +9,16 @@
   "paths": {
     "/status": {
       "get": {
+        "summary": "Get management status",
+        "operationId": "getManagementStatus",
         "security": [],
-        "responses": { "200": { "description": "Setup and runtime status, including the restart-local pre-authentication CSRF token" } }
+        "responses": { "200": { "description": "Setup and runtime status, including the restart-local pre-authentication CSRF token", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/StatusResponse" } } } } }
       }
     },
     "/setup": {
       "post": {
+        "summary": "Initialize the service",
+        "operationId": "initializeService",
         "security": [],
         "requestBody": {
           "required": true,
@@ -23,9 +27,11 @@
         "responses": {
           "201": {
             "description": "Initialized; includes the first raw device token exactly once",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SetupResponse" } } }
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SetupResponse" } } },
+            "headers": { "X-MT-State-Warning": { "$ref": "#/components/headers/StateWarning" } }
           },
           "400": { "$ref": "#/components/responses/Error" },
+          "403": { "$ref": "#/components/responses/Error" },
           "409": { "$ref": "#/components/responses/Error" },
           "422": { "$ref": "#/components/responses/Error" },
           "429": { "$ref": "#/components/responses/Error" },
@@ -36,24 +42,33 @@
     },
     "/session": {
       "get": {
+        "summary": "Get the current administrator session",
+        "operationId": "getAdminSession",
         "responses": { "200": { "description": "Current CSRF token" }, "401": { "$ref": "#/components/responses/Error" } }
       },
       "post": {
+        "summary": "Create an administrator session",
+        "operationId": "createAdminSession",
         "security": [],
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/LoginRequest" } } } },
-        "responses": { "200": { "description": "Administrator session created" }, "401": { "$ref": "#/components/responses/Error" } }
+        "responses": { "200": { "description": "Administrator session created" }, "401": { "$ref": "#/components/responses/Error" }, "403": { "$ref": "#/components/responses/Error" }, "429": { "$ref": "#/components/responses/Error" } }
       },
       "delete": {
-        "responses": { "200": { "description": "Administrator session deleted" } }
+        "summary": "Delete the administrator session",
+        "operationId": "deleteAdminSession",
+        "responses": { "200": { "description": "Administrator session deleted" }, "403": { "$ref": "#/components/responses/Error" } }
       }
     },
     "/settings/qweather": {
-      "get": { "responses": { "200": { "description": "Masked QWeather settings" } } },
+      "get": { "summary": "Get masked QWeather settings", "operationId": "getQWeatherSettings", "responses": { "200": { "description": "Masked QWeather settings" } } },
       "put": {
+        "summary": "Test and replace QWeather settings",
+        "operationId": "replaceQWeatherSettings",
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/QWeatherInput" } } } },
         "responses": {
-          "200": { "description": "Tested, persisted, activated, and returned current weather verification", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/VerificationResponse" } } } },
+          "200": { "description": "Tested, persisted, activated, and returned current weather verification", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/VerificationResponse" } } }, "headers": { "X-MT-State-Warning": { "$ref": "#/components/headers/StateWarning" } } },
           "400": { "$ref": "#/components/responses/Error" }, "422": { "$ref": "#/components/responses/Error" },
+          "403": { "$ref": "#/components/responses/Error" },
           "429": { "$ref": "#/components/responses/Error" }, "502": { "$ref": "#/components/responses/Error" },
           "504": { "$ref": "#/components/responses/Error" }
         }
@@ -61,32 +76,41 @@
     },
     "/settings/qweather/test": {
       "post": {
+        "summary": "Test candidate QWeather settings",
+        "operationId": "testQWeatherSettings",
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/QWeatherInput" } } } },
         "responses": {
           "200": { "description": "Connection test passed and returned current weather without persistence", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/VerificationResponse" } } } },
           "400": { "$ref": "#/components/responses/Error" }, "422": { "$ref": "#/components/responses/Error" },
+          "403": { "$ref": "#/components/responses/Error" },
           "429": { "$ref": "#/components/responses/Error" }, "502": { "$ref": "#/components/responses/Error" },
           "504": { "$ref": "#/components/responses/Error" }
         }
       }
     },
     "/device-tokens": {
-      "get": { "responses": { "200": { "description": "Named token metadata without hashes or raw values" } } },
+      "get": { "summary": "List device tokens", "operationId": "listDeviceTokens", "responses": { "200": { "description": "Named token metadata without hashes or raw values" } } },
       "post": {
+        "summary": "Create a device token",
+        "operationId": "createDeviceToken",
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["name"], "properties": { "name": { "type": "string", "minLength": 1, "maxLength": 64 } } } } } },
-        "responses": { "201": { "description": "Raw token returned exactly once" }, "409": { "$ref": "#/components/responses/Error" } }
+        "responses": { "201": { "description": "Raw token returned exactly once", "headers": { "X-MT-State-Warning": { "$ref": "#/components/headers/StateWarning" } } }, "403": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" } }
       }
     },
     "/device-tokens/{id}": {
       "delete": {
+        "summary": "Revoke a device token",
+        "operationId": "revokeDeviceToken",
         "parameters": [{ "in": "path", "name": "id", "required": true, "schema": { "type": "string" } }],
-        "responses": { "204": { "description": "Token revoked" }, "404": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" } }
+        "responses": { "204": { "description": "Token revoked", "headers": { "X-MT-State-Warning": { "$ref": "#/components/headers/StateWarning" } } }, "403": { "$ref": "#/components/responses/Error" }, "404": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" } }
       }
     },
     "/account/password": {
       "put": {
-        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["current_password", "new_password"], "properties": { "current_password": { "type": "string" }, "new_password": { "type": "string", "minLength": 12, "maxLength": 128 } } } } } },
-        "responses": { "200": { "description": "Password updated and all sessions invalidated" }, "401": { "$ref": "#/components/responses/Error" } }
+        "summary": "Change the administrator password",
+        "operationId": "changeAdminPassword",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["current_password", "new_password"], "properties": { "current_password": { "type": "string" }, "new_password": { "type": "string", "description": "At least 12 Unicode code points and at most 128 UTF-8 bytes.", "minLength": 12, "maxLength": 128 } } } } } },
+        "responses": { "200": { "description": "Password updated and all sessions invalidated", "headers": { "X-MT-State-Warning": { "$ref": "#/components/headers/StateWarning" } } }, "401": { "$ref": "#/components/responses/Error" }, "403": { "$ref": "#/components/responses/Error" } }
       }
     }
   },
@@ -95,10 +119,25 @@
     "securitySchemes": {
       "adminSession": { "type": "apiKey", "in": "cookie", "name": "mt_admin_session" }
     },
+    "headers": {
+      "StateWarning": { "description": "The state file was renamed successfully, but directory durability could not be confirmed.", "schema": { "type": "string", "const": "durability_unconfirmed" } }
+    },
     "responses": {
       "Error": { "description": "Stable JSON error", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } }
     },
     "schemas": {
+      "StatusResponse": {
+        "type": "object",
+        "required": ["configured", "status", "version", "secure_transport", "state_durability", "csrf_token"],
+        "properties": {
+          "configured": { "type": "boolean" },
+          "status": { "type": "string", "enum": ["setup_required", "ready", "unavailable"] },
+          "version": { "type": "string" },
+          "secure_transport": { "type": "boolean" },
+          "state_durability": { "type": "string", "enum": ["not_applicable", "confirmed", "unconfirmed"] },
+          "csrf_token": { "type": "string" }
+        }
+      },
       "QWeatherInput": {
         "type": "object",
         "required": ["api_host", "project_id", "credential_id", "test_location"],
@@ -127,7 +166,7 @@
 		"type": "object",
 		"required": ["password", "qweather", "device_name"],
         "properties": {
-          "password": { "type": "string", "minLength": 12, "maxLength": 128 },
+          "password": { "type": "string", "description": "At least 12 Unicode code points and at most 128 UTF-8 bytes.", "minLength": 12, "maxLength": 128 },
 		  "qweather": { "$ref": "#/components/schemas/QWeatherInput" },
           "device_name": { "type": "string", "minLength": 1, "maxLength": 64 }
         }
@@ -136,7 +175,15 @@
         "type": "object",
         "required": ["source", "location", "tested_at", "updated_at", "data"],
         "properties": {
-          "source": { "type": "object", "required": ["id", "name", "attribution_url"] },
+          "source": {
+            "type": "object",
+            "required": ["id", "name", "attribution_url"],
+            "properties": {
+              "id": { "type": "string", "const": "qweather" },
+              "name": { "type": "string", "const": "QWeather" },
+              "attribution_url": { "type": "string", "format": "uri" }
+            }
+          },
           "location": {
             "type": "object",
 			"required": ["source", "provider", "precision"],
@@ -176,7 +223,7 @@
       "LoginRequest": { "type": "object", "required": ["password"], "properties": { "password": { "type": "string" } } },
       "ErrorResponse": {
         "type": "object", "required": ["error"],
-        "properties": { "error": { "type": "object", "required": ["code", "message"], "properties": { "code": { "type": "string" }, "message": { "type": "string" }, "request_id": { "type": "string" } } } }
+        "properties": { "error": { "type": "object", "required": ["code", "message"], "properties": { "code": { "type": "string", "description": "Stable error code. Origin and CSRF failures are reported separately as origin_rejected and csrf_rejected; QWeather test concurrency uses qweather_test_busy and qweather_test_rate_limited.", "examples": ["origin_rejected", "csrf_rejected", "qweather_test_busy", "qweather_test_rate_limited"] }, "message": { "type": "string" }, "request_id": { "type": "string" } } } }
       }
     }
   }

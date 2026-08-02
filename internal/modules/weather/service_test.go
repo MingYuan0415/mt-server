@@ -14,9 +14,10 @@ import (
 )
 
 type fakeProvider struct {
-	calls atomic.Int32
-	ready error
-	fetch func(context.Context, Kind, location.Point) (ProviderResult, error)
+	calls  atomic.Int32
+	closes atomic.Int32
+	ready  error
+	fetch  func(context.Context, Kind, location.Point) (ProviderResult, error)
 }
 
 func (f *fakeProvider) Source() Source {
@@ -30,6 +31,11 @@ func (f *fakeProvider) Fetch(ctx context.Context, kind Kind,
 }
 
 func (f *fakeProvider) Ready() error { return f.ready }
+
+func (f *fakeProvider) Close() error {
+	f.closes.Add(1)
+	return nil
+}
 
 func TestServiceCachesAndIsolatesLocations(t *testing.T) {
 	now := time.Date(2026, 8, 2, 0, 0, 0, 0, time.UTC)
@@ -182,6 +188,76 @@ func TestServiceReadinessDelegatesProvider(t *testing.T) {
 	defer closeService(t, service)
 	if service.Ready() == nil {
 		t.Fatal("expected readiness error")
+	}
+}
+
+func TestServiceUsesExponentialBackoffAndResetsAfterSuccess(t *testing.T) {
+	now := time.Date(2026, 8, 2, 0, 0, 0, 0, time.UTC)
+	shouldFail := true
+	provider := &fakeProvider{fetch: func(context.Context, Kind, location.Point) (ProviderResult, error) {
+		if shouldFail {
+			return ProviderResult{}, errors.New("offline")
+		}
+		return ProviderResult{UpdatedAt: now, Data: Current{}}, nil
+	}}
+	service := newTestService(provider, 64)
+	service.now = func() time.Time { return now }
+	service.jitter = func(delay time.Duration) time.Duration { return delay }
+	defer closeService(t, service)
+	point := location.Point{Latitude: 30, Longitude: 120}
+
+	for failure, expected := range []time.Duration{5 * time.Second, 10 * time.Second, 20 * time.Second} {
+		if _, err := service.Get(context.Background(), KindCurrent, point); !errors.Is(err, ErrUnavailable) {
+			t.Fatalf("failure %d unexpectedly succeeded", failure+1)
+		}
+		entry := service.entries[cacheKey{location: point.CacheKey(), kind: KindCurrent}]
+		if got := entry.retryAfter.Sub(now); got != expected {
+			t.Fatalf("failure %d backoff = %s, want %s", failure+1, got, expected)
+		}
+		now = entry.retryAfter
+	}
+
+	shouldFail = false
+	if _, err := service.Get(context.Background(), KindCurrent, point); err != nil {
+		t.Fatal(err)
+	}
+	entry := service.entries[cacheKey{location: point.CacheKey(), kind: KindCurrent}]
+	if entry.failures != 0 || !entry.retryAfter.IsZero() {
+		t.Fatalf("successful refresh did not reset backoff: %#v", entry)
+	}
+}
+
+type delayedError struct{ delay time.Duration }
+
+func (e delayedError) Error() string             { return "delayed" }
+func (e delayedError) RetryDelay() time.Duration { return e.delay }
+
+func TestServiceHonorsProviderRetryDelay(t *testing.T) {
+	if got := retryDelay(delayedError{delay: 15 * time.Minute}, 8,
+		func(time.Duration) time.Duration { return time.Second }); got != 15*time.Minute {
+		t.Fatalf("provider delay was changed: %s", got)
+	}
+}
+
+func TestJitterDelayStaysWithinBounds(t *testing.T) {
+	for range 100 {
+		got := jitterDelay(100 * time.Second)
+		if got < 80*time.Second || got > 120*time.Second {
+			t.Fatalf("jitter out of bounds: %s", got)
+		}
+	}
+	if got := jitterDelay(maximumRetryDelay); got > maximumRetryDelay {
+		t.Fatalf("maximum retry delay exceeded: %s", got)
+	}
+}
+
+func TestServiceClosesProviderOnce(t *testing.T) {
+	provider := &fakeProvider{fetch: successfulFetch(time.Now())}
+	service := newTestService(provider, 64)
+	closeService(t, service)
+	closeService(t, service)
+	if provider.closes.Load() != 1 {
+		t.Fatalf("provider closed %d times", provider.closes.Load())
 	}
 }
 

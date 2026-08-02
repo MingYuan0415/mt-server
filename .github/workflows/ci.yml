@@ -1,6 +1,7 @@
 name: CI
 
 on:
+  workflow_call:
   push:
     branches: [main]
   pull_request:
@@ -22,7 +23,16 @@ jobs:
       - name: Vet
         run: go vet ./...
       - name: Test
-        run: go test -coverprofile=coverage.out ./...
+        run: |
+          go test -count=1 -coverprofile=coverage.out ./...
+          total="$(go tool cover -func=coverage.out | awk '/^total:/ {gsub(/%/, "", $3); print $3}')"
+          awk -v value="$total" 'BEGIN { if (value + 0 < 70) exit 1 }'
+          go test -count=1 -coverprofile=admin-coverage.out ./internal/modules/admin
+          admin="$(go tool cover -func=admin-coverage.out | awk '/^total:/ {gsub(/%/, "", $3); print $3}')"
+          awk -v value="$admin" 'BEGIN { if (value + 0 < 70) exit 1 }'
+          go test -count=1 -coverprofile=qweather-coverage.out ./internal/providers/qweather
+          qweather="$(go tool cover -func=qweather-coverage.out | awk '/^total:/ {gsub(/%/, "", $3); print $3}')"
+          awk -v value="$qweather" 'BEGIN { if (value + 0 < 75) exit 1 }'
       - name: Race test
         run: go test -race ./...
       - name: Vulnerability scan
@@ -48,6 +58,10 @@ jobs:
           cache: npm
       - name: Install frontend test dependencies
         run: npm ci
+      - name: Audit npm dependencies
+        run: npm audit --audit-level=high
+      - name: Validate OpenAPI contracts
+        run: npm run lint:openapi
       - name: Install Chromium
         run: npx playwright install --with-deps chromium
       - name: Test management interface

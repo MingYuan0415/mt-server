@@ -36,6 +36,9 @@ func TestNewStartsUnconfiguredManagementPlane(t *testing.T) {
 		{path: "/health/ready", status: http.StatusServiceUnavailable, body: "setup_required"},
 		{path: "/api/v1/weather/current", status: http.StatusServiceUnavailable, body: "service_unconfigured"},
 		{path: "/admin/", status: http.StatusOK, body: "mt-server"},
+		{path: "/admin/missing", status: http.StatusNotFound, body: "not_found"},
+		{path: "/admin/assets/missing.js", status: http.StatusNotFound, body: "not_found"},
+		{path: "/admin/api/v1/missing", status: http.StatusNotFound, body: "not_found"},
 	} {
 		recorder := httptest.NewRecorder()
 		application.server.Handler.ServeHTTP(recorder,
@@ -55,7 +58,7 @@ func TestNewRestoresConfiguredRuntimeWithoutCallingUpstream(t *testing.T) {
 	now := time.Now().UTC()
 	value := validRuntimeState(t)
 	value.UpdatedAt = now
-	if err := store.CommitInitial(value); err != nil {
+	if _, err := store.CommitInitial(value); err != nil {
 		t.Fatal(err)
 	}
 	application, err := New(config.Config{

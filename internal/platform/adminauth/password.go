@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"errors"
+	"unicode/utf8"
 
 	"github.com/MingYuan0415/mt-server/internal/platform/state"
 	"golang.org/x/crypto/argon2"
@@ -21,8 +22,8 @@ const (
 
 // HashPassword creates an Argon2id password verifier.
 func HashPassword(password string) (state.PasswordHash, error) {
-	if len(password) < 12 || len(password) > 128 {
-		return state.PasswordHash{}, errors.New("password must contain 12-128 bytes")
+	if !utf8.ValidString(password) || utf8.RuneCountInString(password) < 12 || len(password) > 128 {
+		return state.PasswordHash{}, errors.New("password must contain at least 12 Unicode characters and at most 128 UTF-8 bytes")
 	}
 	salt := make([]byte, passwordSaltSize)
 	if _, err := rand.Read(salt); err != nil {

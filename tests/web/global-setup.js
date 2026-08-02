@@ -7,7 +7,7 @@ module.exports = async function globalSetup() {
   const root = path.resolve(__dirname, "../..");
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "mt-server-playwright-"));
   const binary = path.join(directory, "mt-server");
-  execFileSync("go", ["build", "-trimpath", "-o", binary, "./cmd/mt-server"], {
+  execFileSync("go", ["build", "-trimpath", "-o", binary, "./tests/web/harness"], {
     cwd: root,
     stdio: "inherit"
   });
@@ -16,10 +16,7 @@ module.exports = async function globalSetup() {
     cwd: root,
     env: {
       ...process.env,
-      MT_LISTEN_ADDR: "127.0.0.1:18080",
-      MT_LOG_LEVEL: "info",
-      MT_STATE_DIR: path.join(directory, "state"),
-      MT_ADMIN_ALLOW_INSECURE_HTTP: "true"
+      MT_STATE_DIR: path.join(directory, "state")
     },
     stdio: ["ignore", "pipe", "pipe"]
   });

@@ -49,24 +49,62 @@ func RequestContext(logger *slog.Logger, next http.Handler) http.Handler {
 		started := time.Now()
 		requestID := newRequestID()
 		ctx := context.WithValue(r.Context(), requestIDKey{}, requestID)
-		w.Header().Set("X-Request-ID", requestID)
+		observer := &responseObserver{ResponseWriter: w}
+		observer.Header().Set("X-Request-ID", requestID)
 
 		defer func() {
 			if recovered := recover(); recovered != nil {
-				logger.Error("request panic", "request_id", requestID, "path", r.URL.Path)
-				WriteError(w, r.WithContext(ctx), http.StatusInternalServerError,
-					"internal_error", "internal server error")
+				committed := observer.committed
+				logger.Error("request panic", "request_id", requestID, "path", r.URL.Path,
+					"response_committed", committed)
+				if !committed {
+					WriteError(observer, r.WithContext(ctx), http.StatusInternalServerError,
+						"internal_error", "internal server error")
+				}
+			}
+			status := observer.status
+			if status == 0 {
+				status = http.StatusOK
 			}
 			logger.Info("request completed",
 				"request_id", requestID,
 				"method", r.Method,
 				"path", r.URL.Path,
+				"status", status,
+				"response_bytes", observer.bytes,
 				"duration_ms", time.Since(started).Milliseconds())
 		}()
 
-		next.ServeHTTP(w, r.WithContext(ctx))
+		next.ServeHTTP(observer, r.WithContext(ctx))
 	})
 }
+
+type responseObserver struct {
+	http.ResponseWriter
+	status    int
+	bytes     int64
+	committed bool
+}
+
+func (w *responseObserver) WriteHeader(status int) {
+	if w.committed {
+		return
+	}
+	w.status = status
+	w.committed = true
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *responseObserver) Write(contents []byte) (int, error) {
+	if !w.committed {
+		w.WriteHeader(http.StatusOK)
+	}
+	written, err := w.ResponseWriter.Write(contents)
+	w.bytes += int64(written)
+	return written, err
+}
+
+func (w *responseObserver) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 // RequestID returns the current request ID.
 func RequestID(ctx context.Context) string {

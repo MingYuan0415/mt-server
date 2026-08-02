@@ -21,7 +21,7 @@ func TestStoreInitialCommitAndRestart(t *testing.T) {
 	}
 	now := time.Date(2026, 8, 2, 0, 0, 0, 0, time.UTC)
 	value := minimalState(now)
-	if err := store.CommitInitial(value); err != nil {
+	if _, err := store.CommitInitial(value); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(directory, "bootstrap.json")); !errors.Is(err, os.ErrNotExist) {
@@ -61,7 +61,8 @@ func TestStoreConcurrentInitialCommitHasOneWinner(t *testing.T) {
 		go func() {
 			defer workers.Done()
 			<-start
-			results <- store.CommitInitial(minimalState(time.Now().UTC()))
+			_, err := store.CommitInitial(minimalState(time.Now().UTC()))
+			results <- err
 		}()
 	}
 	close(start)
@@ -135,21 +136,76 @@ func TestStoreSaveIsAtomicAndRequiresInitialization(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Save(minimalState(time.Now())); !errors.Is(err, ErrNotInitialized) {
+	if _, err := store.Save(minimalState(time.Now())); !errors.Is(err, ErrNotInitialized) {
 		t.Fatalf("expected uninitialized error, got %v", err)
 	}
 	now := time.Now().UTC()
 	value := minimalState(now)
-	if err := store.CommitInitial(value); err != nil {
+	if _, err := store.CommitInitial(value); err != nil {
 		t.Fatal(err)
 	}
 	value.QWeather.APIHost = "second.re.qweatherapi.com"
-	if err := store.Save(value); err != nil {
+	if _, err := store.Save(value); err != nil {
 		t.Fatal(err)
 	}
 	loaded, err := store.Load()
 	if err != nil || loaded.QWeather.APIHost != value.QWeather.APIHost {
 		t.Fatalf("save did not replace state: %#v %v", loaded, err)
+	}
+}
+
+func TestStoreWriteCommitBoundaryAndDurabilityRecovery(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := minimalState(time.Now().UTC())
+	if _, err := store.CommitInitial(original); err != nil {
+		t.Fatal(err)
+	}
+
+	candidate := original
+	candidate.QWeather.APIHost = "candidate.re.qweatherapi.com"
+	store.createTemporary = func(string, string) (*os.File, error) {
+		return nil, errors.New("injected temporary-file failure")
+	}
+	if _, err := store.Save(candidate); err == nil {
+		t.Fatal("expected temporary-file failure")
+	}
+	store.createTemporary = os.CreateTemp
+	store.syncFile = func(*os.File) error { return errors.New("injected file sync failure") }
+	if _, err := store.Save(candidate); err == nil {
+		t.Fatal("expected pre-commit file sync failure")
+	}
+	store.syncFile = func(file *os.File) error { return file.Sync() }
+	store.rename = func(string, string) error { return errors.New("injected rename failure") }
+	if _, err := store.Save(candidate); err == nil {
+		t.Fatal("expected pre-commit rename failure")
+	}
+	loaded, err := store.Load()
+	if err != nil || loaded.QWeather.APIHost != original.QWeather.APIHost {
+		t.Fatalf("pre-commit failure changed state: %#v %v", loaded, err)
+	}
+
+	store.rename = os.Rename
+	store.syncDirectory = func(string) error { return errors.New("injected directory sync failure") }
+	result, err := store.Save(candidate)
+	if err != nil || result.DurabilityConfirmed || result.DurabilityWarning == nil {
+		t.Fatalf("unexpected post-commit result %#v %v", result, err)
+	}
+	if store.DurabilityConfirmed() {
+		t.Fatal("durability warning was not retained")
+	}
+	loaded, err = store.Load()
+	if err != nil || loaded.QWeather.APIHost != candidate.QWeather.APIHost {
+		t.Fatalf("post-commit state was not visible: %#v %v", loaded, err)
+	}
+
+	store.syncDirectory = syncDirectory
+	candidate.QWeather.APIHost = "confirmed.re.qweatherapi.com"
+	result, err = store.Save(candidate)
+	if err != nil || !result.DurabilityConfirmed || !store.DurabilityConfirmed() {
+		t.Fatalf("successful sync did not clear warning: %#v %v", result, err)
 	}
 }
 

@@ -35,6 +35,49 @@ type runtimeInstance struct {
 	handler http.Handler
 }
 
+type preparedRuntimeChange struct {
+	manager   *RuntimeManager
+	instance  *runtimeInstance
+	deviceIDs []string
+}
+
+func (p *preparedRuntimeChange) Activate() {
+	if p.instance == nil {
+		return
+	}
+	p.manager.activate(p.instance, p.deviceIDs)
+	p.instance = nil
+}
+
+func (p *preparedRuntimeChange) Discard() {
+	if p.instance == nil {
+		return
+	}
+	p.manager.closeService(p.instance.service, "discarded weather runtime")
+	p.instance = nil
+}
+
+type preparedTokenChange struct {
+	manager   *RuntimeManager
+	handler   http.Handler
+	deviceIDs []string
+}
+
+func (p *preparedTokenChange) Activate() {
+	if p.handler == nil {
+		return
+	}
+	p.manager.mu.Lock()
+	if p.manager.current != nil {
+		p.manager.current.handler = p.handler
+	}
+	p.manager.mu.Unlock()
+	p.manager.limiter.Retain(p.deviceIDs)
+	p.handler = nil
+}
+
+func (p *preparedTokenChange) Discard() { p.handler = nil }
+
 // RuntimeManager owns the active weather, location, and device-auth snapshot.
 type RuntimeManager struct {
 	mu      sync.RWMutex
@@ -91,6 +134,7 @@ func (m *RuntimeManager) Test(ctx context.Context, value state.State,
 	if err != nil {
 		return weather.Verification{}, "", err
 	}
+	defer provider.Close()
 	if testPoint == nil {
 		return weather.Verification{}, "", location.ErrRequired
 	}
@@ -121,9 +165,19 @@ func (m *RuntimeManager) Test(ctx context.Context, value state.State,
 
 // Apply builds and atomically activates a complete runtime.
 func (m *RuntimeManager) Apply(value state.State) error {
-	provider, options, credentials, err := m.buildComponents(value)
+	prepared, err := m.Prepare(value)
 	if err != nil {
 		return err
+	}
+	prepared.Activate()
+	return nil
+}
+
+// Prepare builds a complete runtime without changing the active snapshot.
+func (m *RuntimeManager) Prepare(value state.State) (platform.PreparedChange, error) {
+	provider, options, credentials, err := m.buildComponents(value)
+	if err != nil {
+		return nil, err
 	}
 	service := weather.NewService(provider, m.logger, options)
 	module := weather.NewModule(service, m.limiter, m.logger)
@@ -132,41 +186,49 @@ func (m *RuntimeManager) Apply(value state.State) error {
 	apiMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		httpapi.WriteError(w, r, http.StatusNotFound, "not_found", "resource not found")
 	})
-	instance := &runtimeInstance{
+	return &preparedRuntimeChange{manager: m, instance: &runtimeInstance{
 		service: service,
 		apiMux:  apiMux,
 		handler: auth.NewCredentials(credentials).Wrap(apiMux),
-	}
+	}, deviceIDs: deviceIDs(value.DeviceTokens)}, nil
+}
 
+func (m *RuntimeManager) activate(instance *runtimeInstance, retainedDeviceIDs []string) {
 	m.mu.Lock()
 	previous := m.current
 	m.current = instance
 	m.mu.Unlock()
-	m.limiter.Retain(deviceIDs(value.DeviceTokens))
+	m.limiter.Retain(retainedDeviceIDs)
 	if previous != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-		defer cancel()
-		if err := previous.service.Close(ctx); err != nil {
-			m.logger.Warn("old weather runtime did not close cleanly", "error", err)
-		}
+		m.closeService(previous.service, "old weather runtime")
 	}
-	return nil
 }
 
 // ReplaceTokens updates device credentials without discarding weather cache.
 func (m *RuntimeManager) ReplaceTokens(tokens []state.DeviceToken) error {
-	credentials, err := credentialsFromState(tokens)
+	prepared, err := m.PrepareTokens(tokens)
 	if err != nil {
 		return err
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.current == nil {
-		return platform.ErrSetupRequired
-	}
-	m.current.handler = auth.NewCredentials(credentials).Wrap(m.current.apiMux)
-	m.limiter.Retain(deviceIDs(tokens))
+	prepared.Activate()
 	return nil
+}
+
+// PrepareTokens builds a device-auth snapshot without changing active credentials.
+func (m *RuntimeManager) PrepareTokens(tokens []state.DeviceToken) (platform.PreparedChange, error) {
+	credentials, err := credentialsFromState(tokens)
+	if err != nil {
+		return nil, err
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.current == nil {
+		return nil, platform.ErrSetupRequired
+	}
+	return &preparedTokenChange{
+		manager: m, handler: auth.NewCredentials(credentials).Wrap(m.current.apiMux),
+		deviceIDs: deviceIDs(tokens),
+	}, nil
 }
 
 // Close stops the active weather service.
@@ -179,6 +241,14 @@ func (m *RuntimeManager) Close(ctx context.Context) error {
 		return nil
 	}
 	return current.service.Close(ctx)
+}
+
+func (m *RuntimeManager) closeService(service *weather.Service, label string) {
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+	if err := service.Close(ctx); err != nil {
+		m.logger.Warn(label+" did not close cleanly", "error", err)
+	}
 }
 
 func (m *RuntimeManager) buildComponents(value state.State) (*qweather.Client,
@@ -201,6 +271,7 @@ func (m *RuntimeManager) buildComponents(value state.State) (*qweather.Client,
 	}
 	credentials, err := credentialsFromState(value.DeviceTokens)
 	if err != nil {
+		_ = provider.Close()
 		return nil, weather.CacheOptions{}, nil, err
 	}
 	options := weather.CacheOptions{

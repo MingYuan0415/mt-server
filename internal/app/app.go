@@ -53,7 +53,8 @@ func New(cfg config.Config, logger *slog.Logger, version string) (*App, error) {
 		store,
 		runtime,
 		adminauth.NewSessions(),
-		adminauth.NewTransportPolicy(cfg.AdminAllowInsecureHTTP, cfg.AdminBehindHTTPSProxy),
+		adminauth.NewTransportPolicy(cfg.AdminAllowInsecureHTTP, cfg.AdminBehindHTTPSProxy,
+			cfg.AdminPublicOrigins...),
 		logger,
 		version,
 	)

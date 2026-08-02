@@ -3,6 +3,8 @@ package weather
 import (
 	"container/list"
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -10,6 +12,11 @@ import (
 	"time"
 
 	"github.com/MingYuan0415/mt-server/internal/platform/location"
+)
+
+const (
+	initialRetryDelay = 5 * time.Second
+	maximumRetryDelay = 5 * time.Minute
 )
 
 // ErrUnavailable means no acceptable cached or upstream data is available.
@@ -35,6 +42,7 @@ type cacheEntry struct {
 	wait       chan struct{}
 	lastError  error
 	retryAfter time.Time
+	failures   uint
 }
 
 type locationEntry struct {
@@ -60,10 +68,13 @@ type Service struct {
 	policies map[Kind]policy
 	maximum  int
 	now      func() time.Time
+	jitter   func(time.Duration) time.Duration
 
-	ctx    context.Context
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	ctx      context.Context
+	cancel   context.CancelFunc
+	wg       sync.WaitGroup
+	close    sync.Once
+	closeErr error
 
 	mu        sync.Mutex
 	entries   map[cacheKey]*cacheEntry
@@ -85,6 +96,7 @@ func NewService(provider Provider, logger *slog.Logger, options CacheOptions) *S
 		},
 		maximum:   options.MaxLocations,
 		now:       time.Now,
+		jitter:    jitterDelay,
 		ctx:       ctx,
 		cancel:    cancel,
 		entries:   make(map[cacheKey]*cacheEntry),
@@ -170,10 +182,15 @@ func (s *Service) Close(ctx context.Context) error {
 	}()
 	select {
 	case <-ctx.Done():
-		return ctx.Err()
+		return errors.Join(ctx.Err(), s.closeProvider())
 	case <-done:
-		return nil
+		return s.closeProvider()
 	}
+}
+
+func (s *Service) closeProvider() error {
+	s.close.Do(func() { s.closeErr = s.provider.Close() })
+	return s.closeErr
 }
 
 func (s *Service) refreshAsync(key cacheKey, entry *cacheEntry, kind Kind,
@@ -204,9 +221,11 @@ func (s *Service) finishRefresh(entry *cacheEntry, result ProviderResult,
 		entry.hasValue = true
 		entry.lastError = nil
 		entry.retryAfter = time.Time{}
+		entry.failures = 0
 	} else {
 		entry.lastError = refreshError
-		entry.retryAfter = now.Add(retryDelay(refreshError))
+		entry.failures++
+		entry.retryAfter = now.Add(retryDelay(refreshError, entry.failures, s.jitter))
 	}
 	entry.refreshing = false
 	if entry.wait != nil {
@@ -263,7 +282,7 @@ type retryDelayProvider interface {
 	RetryDelay() time.Duration
 }
 
-func retryDelay(err error) time.Duration {
+func retryDelay(err error, failures uint, jitter func(time.Duration) time.Duration) time.Duration {
 	var provider retryDelayProvider
 	if errors.As(err, &provider) {
 		delay := provider.RetryDelay()
@@ -271,5 +290,29 @@ func retryDelay(err error) time.Duration {
 			return delay
 		}
 	}
-	return 5 * time.Second
+	if failures == 0 {
+		failures = 1
+	}
+	delay := initialRetryDelay
+	for count := uint(1); count < failures && delay < maximumRetryDelay; count++ {
+		delay *= 2
+	}
+	if delay > maximumRetryDelay {
+		delay = maximumRetryDelay
+	}
+	return jitter(delay)
+}
+
+func jitterDelay(delay time.Duration) time.Duration {
+	minimum := delay * 80 / 100
+	span := delay * 40 / 100
+	var randomBytes [8]byte
+	if _, err := rand.Read(randomBytes[:]); err != nil {
+		return delay
+	}
+	result := minimum + time.Duration(binary.LittleEndian.Uint64(randomBytes[:])%uint64(span+1))
+	if result > maximumRetryDelay {
+		return maximumRetryDelay
+	}
+	return result
 }

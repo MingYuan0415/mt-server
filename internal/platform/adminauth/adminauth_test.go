@@ -3,6 +3,7 @@ package adminauth
 import (
 	"crypto/tls"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -18,6 +19,48 @@ func TestPasswordHashAndVerification(t *testing.T) {
 	}
 	if _, err := HashPassword("too-short"); err == nil {
 		t.Fatal("expected short password rejection")
+	}
+	unicodePassword := "天气服务管理密码天气服务"
+	if _, err := HashPassword(unicodePassword); err != nil {
+		t.Fatalf("valid Unicode password was rejected: %v", err)
+	}
+	if _, err := HashPassword("天气服务管理密码天气服"); err == nil {
+		t.Fatal("expected 11-code-point password rejection")
+	}
+	if _, err := HashPassword(strings.Repeat("天", 43)); err == nil {
+		t.Fatal("expected password longer than 128 UTF-8 bytes rejection")
+	}
+}
+
+func TestTransportPolicyAcceptsExplicitPublicOrigins(t *testing.T) {
+	policy := NewTransportPolicy(false, true,
+		"https://api.example.com", "https://[2001:db8::1]:8443")
+	for _, origin := range []string{
+		"https://API.EXAMPLE.COM:443",
+		"https://[2001:DB8::1]:8443",
+	} {
+		request := httptest.NewRequest("POST", "http://mt-server:8080/admin/api/v1/session", nil)
+		request.Host = "mt-server:8080"
+		request.Header.Set("Origin", origin)
+		request.Header.Set("Forwarded", "host=forged.example.com;proto=http")
+		request.Header.Set("X-Forwarded-Host", "forged.example.com")
+		request.Header.Set("X-Forwarded-Proto", "http")
+		if !policy.SameOrigin(request) || !policy.Secure(request) {
+			t.Fatalf("allowed public origin %q was rejected", origin)
+		}
+	}
+
+	rejected := httptest.NewRequest("POST", "http://mt-server:8080/admin/api/v1/session", nil)
+	rejected.Header.Set("Origin", "https://other.example.com")
+	if policy.SameOrigin(rejected) {
+		t.Fatal("non-allowlisted origin was accepted")
+	}
+
+	duplicate := httptest.NewRequest("POST", "http://mt-server:8080/admin/api/v1/session", nil)
+	duplicate.Header.Add("Origin", "https://api.example.com")
+	duplicate.Header.Add("Origin", "https://api.example.com")
+	if policy.SameOrigin(duplicate) {
+		t.Fatal("multiple Origin headers were accepted")
 	}
 }
 
@@ -61,6 +104,10 @@ func TestTransportPolicyRequiresSecureOrExplicitInsecureMode(t *testing.T) {
 	request.Header.Set("Origin", "https://api.example.com?unexpected=true")
 	if policy.SameOrigin(request) {
 		t.Fatal("origin with query data was accepted")
+	}
+	request.Header.Set("Origin", "https://api.example.com:")
+	if policy.SameOrigin(request) {
+		t.Fatal("origin with an empty explicit port was accepted")
 	}
 	request.Header.Set("Origin", "https://api.example.com")
 	directHTTPPolicy := NewTransportPolicy(false, false)

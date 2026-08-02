@@ -14,7 +14,8 @@
 - 按位置网格隔离 LRU 内存缓存，支持并发刷新合并和陈旧数据降级。
 - 按鉴权主体限制短时间位置跳变，保护上游配额。
 - 使用 Argon2id 管理员密码、内存 session、同源校验、CSRF 和全局登录限速。
-- 提供版本化状态、原子写入、健康检查和结构化安全日志。
+- 支持显式 HTTPS 管理 Origin 白名单，适配 Caddy、Cloudflare Tunnel 和其他反向代理。
+- 提供版本化状态、可报告持久性结果的原子写入、健康检查和结构化访问日志。
 - 提供 scratch、非 root、只读根文件系统的多架构容器镜像。
 
 ## 部署
@@ -43,7 +44,7 @@ MT_PUBLIC_HOST=api.example.com docker compose -f deploy/compose.https.yaml up -d
 
 首次打开 `/admin/` 时需要配置：
 
-- 至少 12 字符的管理员密码。
+- 至少 12 个 Unicode 字符且 UTF-8 编码不超过 128 字节的管理员密码。
 - QWeather 账户专属 API Host、Project ID、Credential ID 和 Ed25519 PKCS#8 私钥。
 - 仅用于本次 QWeather 实时验证的临时坐标。
 - 首个设备名称。
@@ -87,12 +88,15 @@ curl https://api.example.com/api/v1/weather/current \
 | `MT_STATE_DIR` | `/var/lib/mt-server` | 必须为绝对路径的可写状态目录 |
 | `MT_ADMIN_ALLOW_INSECURE_HTTP` | `false` | 仅在受信 LAN 中允许 HTTP 管理写操作 |
 | `MT_ADMIN_BEHIND_HTTPS_PROXY` | `false` | 明确声明管理入口始终由受信 HTTPS 代理提供 |
+| `MT_ADMIN_PUBLIC_ORIGINS` | 空 | 最多 16 个逗号分隔的完整 HTTPS Origin；代理部署时用于管理同源校验 |
+
+设置 `MT_ADMIN_PUBLIC_ORIGINS` 时必须同时启用 HTTPS 代理模式并保持 `MT_ADMIN_ALLOW_INSECURE_HTTP=false`。服务直接匹配浏览器 `Origin`，不信任 `Forwarded`、`X-Forwarded-Host` 或 `X-Forwarded-Proto`，因此代理内部使用什么 `Host` 不影响登录。代理必须覆盖客户端同名头并确保源站只允许代理访问。
 
 QWeather 私钥、管理员密码验证器、缓存策略和设备令牌哈希保存在状态卷中。请求位置只用于单次请求、网格限速和内存缓存键，不写入持久状态。
 
 ## 开发与验证
 
-要求 Go 1.26.5 和 Docker Engine。管理界面端到端测试另需 Node.js 22；Node 依赖仅用于开发和 CI。
+要求 Go 1.26.5 和 Docker Engine。管理界面端到端测试及 OpenAPI 校验另需 Node.js 22.12+；Node 依赖仅用于开发和 CI。
 
 ```sh
 make format
@@ -102,7 +106,7 @@ make build
 make docker-build
 ```
 
-CI 执行格式检查、vet、普通及 race 测试、漏洞扫描、静态构建、管理界面测试、容器扫描和镜像冒烟测试，不调用真实 QWeather。
+CI 执行格式检查、vet、普通及 race 测试、覆盖率门槛、Go/npm 漏洞扫描、OpenAPI 校验、管理界面测试、容器扫描和镜像冒烟测试，不调用真实 QWeather。
 
 ## 文档
 

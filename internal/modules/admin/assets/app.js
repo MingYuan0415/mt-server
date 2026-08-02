@@ -6,7 +6,11 @@ const errorMessages = {
   qweather_unavailable: "QWeather 服务暂时不可用，请稍后重试。",
   qweather_timeout: "QWeather 连接测试超时，请检查网络后重试。",
   test_location_unavailable: "请先取得浏览器临时位置，再进行 QWeather 验证。",
-  invalid_test_location: "浏览器临时位置无效，请重新授权定位。"
+  invalid_test_location: "浏览器临时位置无效，请重新授权定位。",
+  origin_rejected: "管理请求来源未被允许，请使用配置的公开 HTTPS 域名访问。",
+  csrf_rejected: "管理会话已过期，请刷新页面后重新登录。",
+  qweather_test_busy: "已有一个 QWeather 连接测试正在进行，请稍后重试。",
+  qweather_test_rate_limited: "QWeather 连接测试次数已达上限，请稍后重试。"
 };
 
 function showView(id) {
@@ -31,6 +35,9 @@ async function api(path, options = {}) {
     request.headers["X-CSRF-Token"] = appState.csrf || appState.publicCSRF;
   }
   const response = await fetch(`/admin/api/v1${path}`, request);
+  if (response.headers.get("X-MT-State-Warning") === "durability_unconfirmed") {
+    showDurabilityWarning();
+  }
   let body = null;
   if (response.status !== 204) {
     try { body = await response.json(); } catch { body = null; }
@@ -75,6 +82,10 @@ function clearTemporaryTestLocation(form) {
 }
 
 function useBrowserLocation(form, messageId) {
+  if (!window.isSecureContext) {
+    showMessage(messageId, "当前是非安全 HTTP 页面，浏览器不会提供定位授权，请手工填写本次测试坐标。", "error");
+    return;
+  }
   if (!navigator.geolocation) {
     showMessage(messageId, "当前浏览器不支持位置授权", "error");
     return;
@@ -132,6 +143,32 @@ function showRawToken(value) {
   document.getElementById("token-dialog").showModal();
 }
 
+function showDurabilityWarning() {
+  const node = document.getElementById("durability-warning");
+  if (!node) return;
+  node.textContent = "状态文件已更新，但系统尚未确认目录持久性。请检查状态卷并在确认后刷新页面。";
+  node.className = "message warning";
+}
+
+function updateDurability(status) {
+  const node = document.getElementById("durability-warning");
+  if (!node) return;
+  if (status.state_durability === "unconfirmed") showDurabilityWarning();
+  else if (status.state_durability === "confirmed") {
+    node.textContent = "";
+    node.className = "message warning hidden";
+  }
+}
+
+function validatePassword(value) {
+  const codePoints = [...value].length;
+  const bytes = new TextEncoder().encode(value).length;
+  if (codePoints < 12 || bytes > 128) {
+    return "密码必须至少包含 12 个 Unicode 字符，且 UTF-8 编码不超过 128 字节";
+  }
+  return "";
+}
+
 async function refreshStatus() {
   const status = await api("/status");
   appState.status = status;
@@ -141,6 +178,7 @@ async function refreshStatus() {
   document.getElementById("overview-ready").textContent = statusNode.textContent;
   document.getElementById("overview-version").textContent = status.version;
   document.getElementById("overview-transport").textContent = status.secure_transport ? "HTTPS" : "HTTP";
+  updateDurability(status);
   return status;
 }
 
@@ -182,7 +220,11 @@ async function loadTokens() {
     button.textContent = "撤销";
     button.addEventListener("click", async () => {
       if (!confirm(`撤销设备“${token.name}”的令牌？`)) return;
-      try { await api(`/device-tokens/${encodeURIComponent(token.id)}`, { method: "DELETE" }); await loadTokens(); }
+      try {
+        await api(`/device-tokens/${encodeURIComponent(token.id)}`, { method: "DELETE" });
+        try { await Promise.all([loadTokens(), refreshStatus()]); }
+        catch { showMessage("token-message", "令牌已撤销，但页面刷新失败，请手动刷新。", "warning"); }
+      }
       catch (error) { showMessage("token-message", error.message, "error"); }
     });
     item.append(description, button);
@@ -197,6 +239,8 @@ document.getElementById("setup-form").addEventListener("submit", async event => 
   if (form.elements.password.value !== form.elements.password_confirm.value) {
     showMessage("setup-message", "两次输入的管理员密码不一致", "error"); return;
   }
+  const passwordError = validatePassword(form.elements.password.value);
+  if (passwordError) { showMessage("setup-message", passwordError, "error"); return; }
   setBusy(form, true);
   try {
     const privateKey = await privateKeyFromForm(form, true);
@@ -215,10 +259,11 @@ document.getElementById("setup-form").addEventListener("submit", async event => 
       }
     });
     appState.csrf = response.csrf_token;
-    form.reset();
-    await loadDashboard();
     showVerification("overview-verification", response.verification);
     showRawToken(response.device_token);
+    form.reset();
+    try { await loadDashboard(); }
+    catch (error) { showMessage("setup-message", `初始化已完成，但仪表盘刷新失败：${error.message}`, "error"); }
   } catch (error) { showMessage("setup-message", error.message, "error"); }
   finally { setBusy(form, false); }
 });
@@ -262,14 +307,25 @@ document.getElementById("qweather-test").addEventListener("click", async () => {
 
 document.getElementById("qweather-form").addEventListener("submit", async event => {
   event.preventDefault(); const form = event.currentTarget; setBusy(form, true); showMessage("qweather-message", "");
-  try { const value = await api("/settings/qweather", { method: "PUT", body: await qweatherPayload(form) }); showMessage("qweather-message", "QWeather 配置已保存并生效", "success"); showVerification("qweather-verification", value.verification); clearTemporaryTestLocation(form); await loadQWeather(); }
+  try {
+    const value = await api("/settings/qweather", { method: "PUT", body: await qweatherPayload(form) });
+    showMessage("qweather-message", "QWeather 配置已保存并生效", "success");
+    showVerification("qweather-verification", value.verification); clearTemporaryTestLocation(form);
+    try { await Promise.all([loadQWeather(), refreshStatus()]); }
+    catch { showMessage("qweather-message", "QWeather 配置已保存，但页面刷新失败，请手动刷新。", "warning"); }
+  }
   catch (error) { showMessage("qweather-message", error.message, "error"); }
   finally { setBusy(form, false); }
 });
 
 document.getElementById("token-form").addEventListener("submit", async event => {
   event.preventDefault(); const form = event.currentTarget; setBusy(form, true); showMessage("token-message", "");
-  try { const value = await api("/device-tokens", { method: "POST", body: { name: form.elements.name.value.trim() } }); form.reset(); showRawToken(value.device_token); await loadTokens(); }
+  try {
+    const value = await api("/device-tokens", { method: "POST", body: { name: form.elements.name.value.trim() } });
+    form.reset(); showRawToken(value.device_token);
+    try { await Promise.all([loadTokens(), refreshStatus()]); }
+    catch { showMessage("token-message", "令牌已创建并显示，但页面刷新失败，请手动刷新。", "warning"); }
+  }
   catch (error) { showMessage("token-message", error.message, "error"); }
   finally { setBusy(form, false); }
 });
@@ -277,6 +333,8 @@ document.getElementById("token-form").addEventListener("submit", async event => 
 document.getElementById("password-form").addEventListener("submit", async event => {
   event.preventDefault(); const form = event.currentTarget; showMessage("password-message", "");
   if (form.elements.new_password.value !== form.elements.new_password_confirm.value) { showMessage("password-message", "两次输入的新密码不一致", "error"); return; }
+  const passwordError = validatePassword(form.elements.new_password.value);
+  if (passwordError) { showMessage("password-message", passwordError, "error"); return; }
   setBusy(form, true);
   try { await api("/account/password", { method: "PUT", body: { current_password: form.elements.current_password.value, new_password: form.elements.new_password.value } }); appState.csrf = ""; form.reset(); showView("login-view"); showMessage("login-message", "密码已更新，请重新登录", "success"); }
   catch (error) { showMessage("password-message", error.message, "error"); }
@@ -293,6 +351,7 @@ document.getElementById("token-dialog").addEventListener("close", () => {
   document.getElementById("raw-token").textContent = "";
   document.getElementById("copy-token").textContent = "复制";
 });
+document.getElementById("token-dialog").addEventListener("cancel", event => event.preventDefault());
 
 (async () => {
   try {

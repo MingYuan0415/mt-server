@@ -14,7 +14,10 @@ module.exports = defineConfig({
   use: {
     baseURL: "http://127.0.0.1:18080",
     locale: "zh-CN",
-    launchOptions: { args: ["--no-proxy-server"] },
+    launchOptions: { args: [
+      "--no-proxy-server",
+      "--host-resolver-rules=MAP insecure.example.test 127.0.0.1"
+    ] },
     trace: "retain-on-failure"
   },
   projects: [

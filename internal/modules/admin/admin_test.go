@@ -14,30 +14,56 @@ import (
 	"time"
 
 	"github.com/MingYuan0415/mt-server/internal/modules/weather"
+	"github.com/MingYuan0415/mt-server/internal/platform"
 	"github.com/MingYuan0415/mt-server/internal/platform/adminauth"
+	"github.com/MingYuan0415/mt-server/internal/platform/httpapi"
 	"github.com/MingYuan0415/mt-server/internal/platform/location"
 	"github.com/MingYuan0415/mt-server/internal/platform/state"
 	providerqweather "github.com/MingYuan0415/mt-server/internal/providers/qweather"
 )
 
 type fakeRuntime struct {
-	testError error
-	testCalls int
-	applied   state.State
-	tokens    []state.DeviceToken
-	testPoint *location.Point
+	testError   error
+	testCalls   int
+	applied     state.State
+	tokens      []state.DeviceToken
+	testPoint   *location.Point
+	testStarted chan struct{}
+	testRelease chan struct{}
 }
+
+type fakePreparedChange struct {
+	activate func()
+}
+
+func (f *fakePreparedChange) Activate() {
+	if f.activate != nil {
+		f.activate()
+		f.activate = nil
+	}
+}
+
+func (f *fakePreparedChange) Discard() { f.activate = nil }
 
 func (f *fakeRuntime) Test(_ context.Context, _ state.State,
 	point *location.Point) (weather.Verification, string, error) {
 	f.testCalls++
 	f.testPoint = point
+	if f.testStarted != nil {
+		select {
+		case f.testStarted <- struct{}{}:
+		default:
+		}
+		<-f.testRelease
+	}
 	return testVerification(), "test-fingerprint", f.testError
 }
-func (f *fakeRuntime) Apply(value state.State) error { f.applied = value; return nil }
-func (f *fakeRuntime) ReplaceTokens(tokens []state.DeviceToken) error {
-	f.tokens = append([]state.DeviceToken(nil), tokens...)
-	return nil
+func (f *fakeRuntime) Prepare(value state.State) (platform.PreparedChange, error) {
+	return &fakePreparedChange{activate: func() { f.applied = value }}, nil
+}
+func (f *fakeRuntime) PrepareTokens(tokens []state.DeviceToken) (platform.PreparedChange, error) {
+	prepared := append([]state.DeviceToken(nil), tokens...)
+	return &fakePreparedChange{activate: func() { f.tokens = prepared }}, nil
 }
 func (f *fakeRuntime) Ready() error { return nil }
 
@@ -170,6 +196,14 @@ func TestQWeatherTestErrorMapping(t *testing.T) {
 			}
 		})
 	}
+	request := httptest.NewRequest(http.MethodPost, "https://api.example.com/admin/api/v1/setup", nil)
+	recorder := httptest.NewRecorder()
+	(&Handler{}).writeTestError(recorder, request, &providerqweather.UpstreamError{
+		HTTPStatus: http.StatusTooManyRequests, Delay: 2 * time.Minute,
+	}, false)
+	if recorder.Header().Get("Retry-After") != "120" {
+		t.Fatalf("QWeather Retry-After was not forwarded: %v", recorder.Header())
+	}
 }
 
 func TestQWeatherFailureRetainsExistingState(t *testing.T) {
@@ -192,6 +226,38 @@ func TestQWeatherFailureRetainsExistingState(t *testing.T) {
 	after, _ := store.Load()
 	if after.QWeather.APIHost != before.QWeather.APIHost {
 		t.Fatal("failed QWeather test replaced persistent settings")
+	}
+}
+
+func TestQWeatherPersistenceFailureDoesNotActivatePreparedRuntime(t *testing.T) {
+	handler, store, runtime, publicCSRF := newTestHandler(t)
+	setup := performSetup(t, handler, publicCSRF)
+	var setupBody map[string]any
+	if err := json.Unmarshal(setup.Body.Bytes(), &setupBody); err != nil {
+		t.Fatal(err)
+	}
+	cookie := setup.Result().Cookies()[0]
+	before, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.RenameForTest(func(string, string) error { return errors.New("injected rename failure") })
+	input := qweatherInput{
+		APIHost: "candidate.re.qweatherapi.com", ProjectID: "candidate",
+		CredentialID: "candidate", TestLocation: validTestLocation(),
+	}
+	recorder := authenticatedRequest(t, handler, http.MethodPut,
+		"/admin/api/v1/settings/qweather", input, cookie, setupBody["csrf_token"].(string))
+	if recorder.Code != http.StatusInternalServerError ||
+		!strings.Contains(recorder.Body.String(), "state_write_failed") {
+		t.Fatalf("unexpected persistence failure: %d %s", recorder.Code, recorder.Body.String())
+	}
+	after, err := store.Load()
+	if err != nil || after.QWeather.APIHost != before.QWeather.APIHost {
+		t.Fatalf("failed persistence changed state: %#v %v", after, err)
+	}
+	if runtime.applied.QWeather.APIHost != before.QWeather.APIHost {
+		t.Fatalf("prepared runtime was activated after failed persistence: %#v", runtime.applied.QWeather)
 	}
 }
 
@@ -232,8 +298,126 @@ func TestManagementWriteRequiresOriginAndCSRF(t *testing.T) {
 	request.AddCookie(cookie)
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusForbidden || !strings.Contains(recorder.Body.String(), "origin_rejected") {
+		t.Fatalf("write without origin/CSRF returned %d %s", recorder.Code, recorder.Body.String())
+	}
+	request = httptest.NewRequest(http.MethodPost,
+		"http://api.example.com/admin/api/v1/device-tokens", strings.NewReader(`{"name":"Device"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Origin", "http://api.example.com")
+	request.Header.Set("X-CSRF-Token", "wrong")
+	request.AddCookie(cookie)
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusForbidden || !strings.Contains(recorder.Body.String(), "csrf_rejected") {
+		t.Fatalf("write with bad CSRF returned %d %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestManagementRejectionLogOmitsRequestMetadataAndSecrets(t *testing.T) {
+	store, err := state.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	management, err := New(store, &fakeRuntime{}, adminauth.NewSessions(),
+		adminauth.NewTransportPolicy(true, false), logger, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	management.RegisterRoutes(mux)
+	request := httptest.NewRequest(http.MethodPost,
+		"http://internal.example/admin/api/v1/setup", strings.NewReader(`{}`))
+	request.Header.Set("Origin", "http://untrusted.example")
+	request.Header.Set("X-CSRF-Token", management.publicCSRF)
+	recorder := httptest.NewRecorder()
+	httpapi.RequestContext(logger, mux).ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusForbidden {
-		t.Fatalf("write without origin/CSRF returned %d", recorder.Code)
+		t.Fatalf("unexpected rejection status %d", recorder.Code)
+	}
+	logValue := logs.String()
+	if !strings.Contains(logValue, "category=origin") || !strings.Contains(logValue, "request_id=") {
+		t.Fatalf("rejection log lacks safe classification: %s", logValue)
+	}
+	for _, forbidden := range []string{
+		"untrusted.example", "internal.example", management.publicCSRF,
+	} {
+		if strings.Contains(logValue, forbidden) {
+			t.Fatalf("rejection log exposed %q: %s", forbidden, logValue)
+		}
+	}
+}
+
+func TestManagementAcceptsAllowlistedPublicOriginWithInternalHost(t *testing.T) {
+	store, err := state.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := &fakeRuntime{}
+	management, err := New(store, runtime, adminauth.NewSessions(),
+		adminauth.NewTransportPolicy(false, true, "https://api.example.com"),
+		slog.New(slog.NewTextHandler(io.Discard, nil)), "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	management.RegisterRoutes(mux)
+	request := httptest.NewRequest(http.MethodPost,
+		"http://mt-server:8080/admin/api/v1/setup", strings.NewReader(`{}`))
+	request.Host = "mt-server:8080"
+	request.Header.Set("Origin", "https://api.example.com")
+	request.Header.Set("X-CSRF-Token", management.publicCSRF)
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "invalid_password") {
+		t.Fatalf("allowlisted public origin was rejected: %d %s", recorder.Code, recorder.Body.String())
+	}
+
+	contents, err := json.Marshal(validSetupRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	request = httptest.NewRequest(http.MethodPost,
+		"http://mt-server:8080/admin/api/v1/setup", bytes.NewReader(contents))
+	request.Host = "mt-server:8080"
+	request.Header.Set("Origin", "https://API.EXAMPLE.COM:443")
+	request.Header.Set("X-CSRF-Token", management.publicCSRF)
+	request.Header.Set("Content-Type", "application/json")
+	recorder = httptest.NewRecorder()
+	mux.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("proxy-style setup failed: %d %s", recorder.Code, recorder.Body.String())
+	}
+	cookies := recorder.Result().Cookies()
+	if len(cookies) == 0 || !cookies[0].Secure || cookies[0].SameSite != http.SameSiteStrictMode {
+		t.Fatalf("proxy session cookie is not secure: %#v", cookies)
+	}
+}
+
+func TestManagementReportsDurabilityWarning(t *testing.T) {
+	handler, store, runtime, publicCSRF := newTestHandler(t)
+	setup := performSetup(t, handler, publicCSRF)
+	if setup.Code != http.StatusCreated {
+		t.Fatalf("setup failed: %d %s", setup.Code, setup.Body.String())
+	}
+	cookie := setup.Result().Cookies()[0]
+	var setupBody map[string]any
+	if err := json.Unmarshal(setup.Body.Bytes(), &setupBody); err != nil {
+		t.Fatal(err)
+	}
+	store.SyncDirectoryForTest(func(string) error { return errors.New("directory sync unavailable") })
+	recorder := authenticatedRequest(t, handler, http.MethodPost,
+		"/admin/api/v1/device-tokens", tokenRequest{Name: "Warning device"}, cookie,
+		setupBody["csrf_token"].(string))
+	if recorder.Code != http.StatusCreated || recorder.Header().Get("X-MT-State-Warning") != stateWarningValue {
+		t.Fatalf("durability warning missing: %d %q %s", recorder.Code,
+			recorder.Header().Get("X-MT-State-Warning"), recorder.Body.String())
+	}
+	if len(runtime.tokens) != 2 {
+		t.Fatalf("committed token snapshot was not activated: %#v", runtime.tokens)
 	}
 }
 
@@ -247,6 +431,148 @@ func TestPublicManagementWriteRequiresPreAuthenticationCSRF(t *testing.T) {
 	handler.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusForbidden || !strings.Contains(recorder.Body.String(), "csrf_rejected") {
 		t.Fatalf("setup without CSRF returned %d %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestQWeatherManagementTestConcurrencyAndRateLimits(t *testing.T) {
+	handler, _, runtime, publicCSRF := newTestHandler(t)
+	setup := performSetup(t, handler, publicCSRF)
+	var setupBody map[string]any
+	if err := json.Unmarshal(setup.Body.Bytes(), &setupBody); err != nil {
+		t.Fatal(err)
+	}
+	cookie := setup.Result().Cookies()[0]
+	csrf := setupBody["csrf_token"].(string)
+	input := qweatherInput{
+		APIHost: "account.re.qweatherapi.com", ProjectID: "project",
+		CredentialID: "credential", TestLocation: validTestLocation(),
+	}
+
+	runtime.testStarted = make(chan struct{}, 1)
+	runtime.testRelease = make(chan struct{})
+	first := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		first <- authenticatedRequest(t, handler, http.MethodPost,
+			"/admin/api/v1/settings/qweather/test", input, cookie, csrf)
+	}()
+	select {
+	case <-runtime.testStarted:
+	case <-time.After(time.Second):
+		t.Fatal("first management test did not start")
+	}
+	busy := authenticatedRequest(t, handler, http.MethodPost,
+		"/admin/api/v1/settings/qweather/test", input, cookie, csrf)
+	if busy.Code != http.StatusTooManyRequests || !strings.Contains(busy.Body.String(), "qweather_test_busy") {
+		t.Fatalf("concurrent management test returned %d %s", busy.Code, busy.Body.String())
+	}
+	close(runtime.testRelease)
+	if result := <-first; result.Code != http.StatusOK {
+		t.Fatalf("first management test failed: %d %s", result.Code, result.Body.String())
+	}
+	runtime.testStarted = nil
+	runtime.testRelease = nil
+
+	// Setup and the successful test above consumed two of the six attempts.
+	for index := 0; index < 4; index++ {
+		result := authenticatedRequest(t, handler, http.MethodPost,
+			"/admin/api/v1/settings/qweather/test", input, cookie, csrf)
+		if result.Code != http.StatusOK {
+			t.Fatalf("allowed management test %d returned %d %s", index, result.Code, result.Body.String())
+		}
+	}
+	limited := authenticatedRequest(t, handler, http.MethodPost,
+		"/admin/api/v1/settings/qweather/test", input, cookie, csrf)
+	if limited.Code != http.StatusTooManyRequests || limited.Header().Get("Retry-After") != "60" ||
+		!strings.Contains(limited.Body.String(), "qweather_test_rate_limited") {
+		t.Fatalf("rate limit returned %d %v %s", limited.Code, limited.Header(), limited.Body.String())
+	}
+}
+
+func TestManagementSessionSettingsAndPasswordFlow(t *testing.T) {
+	handler, _, _, publicCSRF := newTestHandler(t)
+	setup := performSetup(t, handler, publicCSRF)
+	if setup.Code != http.StatusCreated {
+		t.Fatalf("setup failed: %d %s", setup.Code, setup.Body.String())
+	}
+	var setupBody map[string]any
+	if err := json.Unmarshal(setup.Body.Bytes(), &setupBody); err != nil {
+		t.Fatal(err)
+	}
+	setupCookie := setup.Result().Cookies()[0]
+	setupCSRF := setupBody["csrf_token"].(string)
+
+	status := plainRequest(handler, http.MethodGet, "/admin/api/v1/status", nil)
+	if status.Code != http.StatusOK || !strings.Contains(status.Body.String(), `"state_durability":"confirmed"`) {
+		t.Fatalf("unexpected status response: %d %s", status.Code, status.Body.String())
+	}
+	session := authenticatedRequest(t, handler, http.MethodGet,
+		"/admin/api/v1/session", nil, setupCookie, setupCSRF)
+	if session.Code != http.StatusOK {
+		t.Fatalf("session lookup failed: %d %s", session.Code, session.Body.String())
+	}
+
+	input := qweatherInput{
+		APIHost: "next.re.qweatherapi.com", ProjectID: "project-next",
+		CredentialID: "credential-next", TestLocation: validTestLocation(),
+	}
+	tested := authenticatedRequest(t, handler, http.MethodPost,
+		"/admin/api/v1/settings/qweather/test", input, setupCookie, setupCSRF)
+	if tested.Code != http.StatusOK || !strings.Contains(tested.Body.String(), `"status":"ok"`) {
+		t.Fatalf("QWeather test failed: %d %s", tested.Code, tested.Body.String())
+	}
+	saved := authenticatedRequest(t, handler, http.MethodPut,
+		"/admin/api/v1/settings/qweather", input, setupCookie, setupCSRF)
+	if saved.Code != http.StatusOK || !strings.Contains(saved.Body.String(), `"status":"saved"`) {
+		t.Fatalf("QWeather update failed: %d %s", saved.Code, saved.Body.String())
+	}
+
+	badLogin := publicRequest(t, handler, http.MethodPost, "/admin/api/v1/session",
+		loginRequest{Password: "wrong password"}, publicCSRF)
+	if badLogin.Code != http.StatusUnauthorized {
+		t.Fatalf("bad login returned %d %s", badLogin.Code, badLogin.Body.String())
+	}
+	login := publicRequest(t, handler, http.MethodPost, "/admin/api/v1/session",
+		loginRequest{Password: "correct horse battery staple"}, publicCSRF)
+	if login.Code != http.StatusOK || len(login.Result().Cookies()) == 0 {
+		t.Fatalf("login failed: %d %s", login.Code, login.Body.String())
+	}
+	var loginBody map[string]string
+	if err := json.Unmarshal(login.Body.Bytes(), &loginBody); err != nil {
+		t.Fatal(err)
+	}
+	loginCookie := login.Result().Cookies()[0]
+	if staleCSRF := authenticatedRequest(t, handler, http.MethodPost,
+		"/admin/api/v1/device-tokens", tokenRequest{Name: "stale"}, loginCookie, setupCSRF); staleCSRF.Code != http.StatusForbidden || !strings.Contains(staleCSRF.Body.String(), "csrf_rejected") {
+		t.Fatalf("stale CSRF was accepted: %d %s", staleCSRF.Code, staleCSRF.Body.String())
+	}
+
+	wrongPassword := authenticatedRequest(t, handler, http.MethodPut,
+		"/admin/api/v1/account/password", passwordRequest{
+			CurrentPassword: "wrong password", NewPassword: "replacement password value",
+		}, loginCookie, loginBody["csrf_token"])
+	if wrongPassword.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong current password returned %d", wrongPassword.Code)
+	}
+	changed := authenticatedRequest(t, handler, http.MethodPut,
+		"/admin/api/v1/account/password", passwordRequest{
+			CurrentPassword: "correct horse battery staple", NewPassword: "replacement password value",
+		}, loginCookie, loginBody["csrf_token"])
+	if changed.Code != http.StatusOK || !strings.Contains(changed.Body.String(), "password_updated") {
+		t.Fatalf("password change failed: %d %s", changed.Code, changed.Body.String())
+	}
+	if after := authenticatedRequest(t, handler, http.MethodGet,
+		"/admin/api/v1/session", nil, loginCookie, loginBody["csrf_token"]); after.Code != http.StatusUnauthorized {
+		t.Fatalf("password change did not invalidate session: %d", after.Code)
+	}
+}
+
+func TestManagementAssetsAreServedOnlyAtExactPaths(t *testing.T) {
+	handler, _, _, _ := newTestHandler(t)
+	for _, path := range []string{"/admin/", "/admin/assets/styles.css", "/admin/assets/app.js"} {
+		recorder := plainRequest(handler, http.MethodGet, path, nil)
+		if recorder.Code != http.StatusOK || recorder.Header().Get("Content-Security-Policy") == "" {
+			t.Fatalf("asset %s returned %d with headers %v", path, recorder.Code, recorder.Header())
+		}
 	}
 }
 
@@ -320,5 +646,24 @@ func authenticatedRequest(t *testing.T, handler http.Handler, method, path strin
 	request.AddCookie(cookie)
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, request)
+	return recorder
+}
+
+func publicRequest(t *testing.T, handler http.Handler, method, path string,
+	body any, csrf string) *httptest.ResponseRecorder {
+	t.Helper()
+	contents, _ := json.Marshal(body)
+	request := httptest.NewRequest(method, "http://api.example.com"+path, bytes.NewReader(contents))
+	request.Header.Set("Origin", "http://api.example.com")
+	request.Header.Set("X-CSRF-Token", csrf)
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	return recorder
+}
+
+func plainRequest(handler http.Handler, method, path string, body io.Reader) *httptest.ResponseRecorder {
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(method, "http://api.example.com"+path, body))
 	return recorder
 }

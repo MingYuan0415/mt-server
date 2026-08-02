@@ -1,4 +1,4 @@
-.PHONY: all build check clean docker-build format format-check test test-race vet web-test
+.PHONY: all build check clean docker-build format format-check npm-audit openapi test test-race vet web-test
 
 GO ?= go
 BINARY := bin/mt-server
@@ -31,7 +31,14 @@ docker-build:
 
 web-test:
 	npm ci
-	npx playwright test
+	$(MAKE) npm-audit openapi
+	npm run test:web
+
+npm-audit:
+	npm audit --audit-level=high
+
+openapi:
+	npm run lint:openapi
 
 clean:
 	rm -f $(BINARY) coverage.out

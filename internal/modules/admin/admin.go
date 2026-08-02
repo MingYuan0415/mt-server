@@ -12,11 +12,13 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/MingYuan0415/mt-server/internal/modules/weather"
+	"github.com/MingYuan0415/mt-server/internal/platform"
 	"github.com/MingYuan0415/mt-server/internal/platform/adminauth"
 	"github.com/MingYuan0415/mt-server/internal/platform/auth"
 	"github.com/MingYuan0415/mt-server/internal/platform/httpapi"
@@ -26,15 +28,22 @@ import (
 )
 
 const (
-	sessionCookieName = "mt_admin_session"
-	maximumJSONBody   = 64 * 1024
+	sessionCookieName  = "mt_admin_session"
+	maximumJSONBody    = 64 * 1024
+	stateWarningHeader = "X-MT-State-Warning"
+	stateWarningValue  = "durability_unconfirmed"
+)
+
+var (
+	errQWeatherTestBusy        = errors.New("QWeather connection test is already running")
+	errQWeatherTestRateLimited = errors.New("QWeather connection test rate limit exceeded")
 )
 
 // Runtime applies validated state to the live device API.
 type Runtime interface {
 	Test(context.Context, state.State, *location.Point) (weather.Verification, string, error)
-	Apply(state.State) error
-	ReplaceTokens([]state.DeviceToken) error
+	Prepare(state.State) (platform.PreparedChange, error)
+	PrepareTokens([]state.DeviceToken) (platform.PreparedChange, error)
 	Ready() error
 }
 
@@ -46,9 +55,11 @@ type Handler struct {
 	transport     *adminauth.TransportPolicy
 	setupLimit    *adminauth.Limiter
 	loginLimit    *adminauth.Limiter
+	testLimit     *adminauth.Limiter
 	logger        *slog.Logger
 	version       string
 	passwordSlots chan struct{}
+	testSlot      chan struct{}
 	publicCSRF    string
 	changeMu      sync.Mutex
 }
@@ -64,7 +75,9 @@ func New(store *state.Store, runtime Runtime, sessions *adminauth.Sessions,
 		store: store, runtime: runtime, sessions: sessions, transport: transport,
 		setupLimit: adminauth.NewLimiter(5, time.Minute),
 		loginLimit: adminauth.NewLimiter(5, time.Minute),
+		testLimit:  adminauth.NewLimiter(6, time.Minute),
 		logger:     logger, version: version, passwordSlots: make(chan struct{}, 2),
+		testSlot:   make(chan struct{}, 1),
 		publicCSRF: publicCSRF,
 	}, nil
 }
@@ -131,7 +144,12 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ready := "setup_required"
+	durability := "not_applicable"
 	if configured {
+		durability = "confirmed"
+		if !h.store.DurabilityConfirmed() {
+			durability = "unconfirmed"
+		}
 		if err := h.runtime.Ready(); err == nil {
 			ready = "ready"
 		} else {
@@ -143,6 +161,7 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 		"status":           ready,
 		"version":          h.version,
 		"secure_transport": h.transport.Secure(r),
+		"state_durability": durability,
 		"csrf_token":       h.publicCSRF,
 	})
 }
@@ -191,7 +210,28 @@ func (h *Handler) setup(w http.ResponseWriter, r *http.Request) {
 		h.writeTestError(w, r, err, false)
 		return
 	}
-	if err := h.store.CommitInitial(value); err != nil {
+	prepared, err := h.runtime.Prepare(value)
+	if err != nil {
+		h.logger.Error("prepare initialized runtime failed", "error", err)
+		httpapi.WriteError(w, r, http.StatusInternalServerError,
+			"runtime_prepare_failed", "configuration could not be prepared")
+		return
+	}
+	defer prepared.Discard()
+	sessionToken, csrf, err := h.sessions.Create()
+	if err != nil {
+		httpapi.WriteError(w, r, http.StatusInternalServerError,
+			"session_failed", "could not create administrator session")
+		return
+	}
+	keepSession := false
+	defer func() {
+		if !keepSession {
+			h.sessions.Delete(sessionToken)
+		}
+	}()
+	writeResult, err := h.store.CommitInitial(value)
+	if err != nil {
 		if errors.Is(err, state.ErrAlreadyInitialized) {
 			httpapi.WriteError(w, r, http.StatusConflict,
 				"already_configured", "service setup is already complete")
@@ -201,19 +241,10 @@ func (h *Handler) setup(w http.ResponseWriter, r *http.Request) {
 			"state_write_failed", "could not save application state")
 		return
 	}
-	if err := h.runtime.Apply(value); err != nil {
-		h.logger.Error("activate initialized runtime failed", "error", err)
-		httpapi.WriteError(w, r, http.StatusInternalServerError,
-			"runtime_apply_failed", "configuration was saved but could not be activated")
-		return
-	}
+	h.reportWriteResult(w, r, writeResult)
+	prepared.Activate()
 	h.setupLimit.Reset()
-	sessionToken, csrf, err := h.sessions.Create()
-	if err != nil {
-		httpapi.WriteError(w, r, http.StatusInternalServerError,
-			"session_failed", "could not create administrator session")
-		return
-	}
+	keepSession = true
 	h.setSessionCookie(w, r, sessionToken)
 	h.logger.Info("service setup completed")
 	httpapi.WriteJSON(w, http.StatusCreated, map[string]any{
@@ -336,7 +367,14 @@ func (h *Handler) putQWeather(w http.ResponseWriter, r *http.Request) {
 		h.writeTestError(w, r, err, true)
 		return
 	}
-	if !h.saveAndApply(w, r, previous, candidate) {
+	prepared, err := h.runtime.Prepare(candidate)
+	if err != nil {
+		httpapi.WriteError(w, r, http.StatusInternalServerError,
+			"runtime_prepare_failed", "new settings could not be prepared")
+		return
+	}
+	defer prepared.Discard()
+	if !h.saveAndActivate(w, r, candidate, prepared) {
 		return
 	}
 	h.logger.Info("QWeather settings updated")
@@ -378,21 +416,23 @@ func (h *Handler) createToken(w http.ResponseWriter, r *http.Request) {
 		httpapi.WriteError(w, r, http.StatusBadRequest, "invalid_device_name", err.Error())
 		return
 	}
-	previous := append([]state.DeviceToken(nil), value.DeviceTokens...)
 	value.DeviceTokens = append(value.DeviceTokens, token)
 	value.UpdatedAt = time.Now().UTC()
-	if err := h.store.Save(value); err != nil {
+	prepared, err := h.runtime.PrepareTokens(value.DeviceTokens)
+	if err != nil {
+		httpapi.WriteError(w, r, http.StatusInternalServerError,
+			"runtime_prepare_failed", "device token could not be prepared")
+		return
+	}
+	defer prepared.Discard()
+	writeResult, err := h.store.Save(value)
+	if err != nil {
 		httpapi.WriteError(w, r, http.StatusInternalServerError,
 			"state_write_failed", "could not save device token")
 		return
 	}
-	if err := h.runtime.ReplaceTokens(value.DeviceTokens); err != nil {
-		value.DeviceTokens = previous
-		_ = h.store.Save(value)
-		httpapi.WriteError(w, r, http.StatusInternalServerError,
-			"runtime_apply_failed", "device token was not activated")
-		return
-	}
+	h.reportWriteResult(w, r, writeResult)
+	prepared.Activate()
 	h.logger.Info("device token created")
 	httpapi.WriteJSON(w, http.StatusCreated, map[string]any{
 		"device_token": raw, "device": publicToken(token),
@@ -412,10 +452,9 @@ func (h *Handler) deleteToken(w http.ResponseWriter, r *http.Request) {
 			"last_token", "create a replacement token before revoking the last token")
 		return
 	}
-	previous := append([]state.DeviceToken(nil), value.DeviceTokens...)
-	filtered := make([]state.DeviceToken, 0, len(previous)-1)
+	filtered := make([]state.DeviceToken, 0, len(value.DeviceTokens)-1)
 	found := false
-	for _, token := range previous {
+	for _, token := range value.DeviceTokens {
 		if token.ID == id {
 			found = true
 			continue
@@ -428,18 +467,21 @@ func (h *Handler) deleteToken(w http.ResponseWriter, r *http.Request) {
 	}
 	value.DeviceTokens = filtered
 	value.UpdatedAt = time.Now().UTC()
-	if err := h.store.Save(value); err != nil {
+	prepared, err := h.runtime.PrepareTokens(value.DeviceTokens)
+	if err != nil {
+		httpapi.WriteError(w, r, http.StatusInternalServerError,
+			"runtime_prepare_failed", "device token revocation could not be prepared")
+		return
+	}
+	defer prepared.Discard()
+	writeResult, err := h.store.Save(value)
+	if err != nil {
 		httpapi.WriteError(w, r, http.StatusInternalServerError,
 			"state_write_failed", "could not revoke device token")
 		return
 	}
-	if err := h.runtime.ReplaceTokens(value.DeviceTokens); err != nil {
-		value.DeviceTokens = previous
-		_ = h.store.Save(value)
-		httpapi.WriteError(w, r, http.StatusInternalServerError,
-			"runtime_apply_failed", "device token was not revoked")
-		return
-	}
+	h.reportWriteResult(w, r, writeResult)
+	prepared.Activate()
 	h.logger.Info("device token revoked")
 	w.Header().Set("Cache-Control", "private, no-store")
 	w.WriteHeader(http.StatusNoContent)
@@ -474,11 +516,13 @@ func (h *Handler) changePassword(w http.ResponseWriter, r *http.Request) {
 	}
 	value.Admin.Password = passwordHash
 	value.UpdatedAt = time.Now().UTC()
-	if err := h.store.Save(value); err != nil {
+	writeResult, err := h.store.Save(value)
+	if err != nil {
 		httpapi.WriteError(w, r, http.StatusInternalServerError,
 			"state_write_failed", "could not update administrator password")
 		return
 	}
+	h.reportWriteResult(w, r, writeResult)
 	h.sessions.Clear()
 	h.clearSessionCookie(w, r)
 	h.logger.Info("administrator password updated")
@@ -499,10 +543,16 @@ func (h *Handler) requireSession(next http.HandlerFunc, write bool) http.Handler
 					"https_required", "HTTPS is required for management changes")
 				return
 			}
-			if !h.transport.SameOrigin(r) ||
-				!h.sessions.ValidateCSRF(token, r.Header.Get("X-CSRF-Token")) {
+			if !h.transport.SameOrigin(r) {
+				h.logWriteRejection(r, "origin")
 				httpapi.WriteError(w, r, http.StatusForbidden,
-					"csrf_rejected", "management request origin could not be verified")
+					"origin_rejected", "management request origin could not be verified")
+				return
+			}
+			if !h.sessions.ValidateCSRF(token, r.Header.Get("X-CSRF-Token")) {
+				h.logWriteRejection(r, "csrf")
+				httpapi.WriteError(w, r, http.StatusForbidden,
+					"csrf_rejected", "management CSRF token is invalid")
 				return
 			}
 		}
@@ -518,6 +568,7 @@ func (h *Handler) preparePublicWrite(w http.ResponseWriter, r *http.Request,
 		return false
 	}
 	if !h.transport.SameOrigin(r) {
+		h.logWriteRejection(r, "origin")
 		httpapi.WriteError(w, r, http.StatusForbidden,
 			"origin_rejected", "management request origin could not be verified")
 		return false
@@ -525,8 +576,9 @@ func (h *Handler) preparePublicWrite(w http.ResponseWriter, r *http.Request,
 	providedCSRF := r.Header.Get("X-CSRF-Token")
 	if len(providedCSRF) != len(h.publicCSRF) ||
 		subtle.ConstantTimeCompare([]byte(providedCSRF), []byte(h.publicCSRF)) != 1 {
+		h.logWriteRejection(r, "csrf")
 		httpapi.WriteError(w, r, http.StatusForbidden,
-			"csrf_rejected", "management request origin could not be verified")
+			"csrf_rejected", "management CSRF token is invalid")
 		return false
 	}
 	if !limiter.Allow() {
@@ -536,6 +588,11 @@ func (h *Handler) preparePublicWrite(w http.ResponseWriter, r *http.Request,
 		return false
 	}
 	return true
+}
+
+func (h *Handler) logWriteRejection(r *http.Request, category string) {
+	h.logger.Warn("management write rejected",
+		"category", category, "request_id", httpapi.RequestID(r.Context()))
 }
 
 func (h *Handler) sessionFromRequest(r *http.Request) (string, string, bool) {
@@ -574,6 +631,15 @@ func (h *Handler) loadState(w http.ResponseWriter, r *http.Request) (state.State
 
 func (h *Handler) testCandidate(r *http.Request, value state.State,
 	testLocation *testLocationInput) (weather.Verification, string, error) {
+	select {
+	case h.testSlot <- struct{}{}:
+		defer func() { <-h.testSlot }()
+	default:
+		return weather.Verification{}, "", errQWeatherTestBusy
+	}
+	if !h.testLimit.Allow() {
+		return weather.Verification{}, "", errQWeatherTestRateLimited
+	}
 	testContext, cancel := context.WithTimeout(r.Context(), 25*time.Second)
 	defer cancel()
 	if testLocation == nil || testLocation.Latitude == nil || testLocation.Longitude == nil {
@@ -607,6 +673,16 @@ func (h *Handler) writeTestError(w http.ResponseWriter, r *http.Request, err err
 		status = http.StatusGatewayTimeout
 		code = "qweather_timeout"
 		message = "QWeather connection test timed out"
+	} else if errors.Is(err, errQWeatherTestBusy) {
+		status = http.StatusTooManyRequests
+		code = "qweather_test_busy"
+		message = "Another QWeather connection test is already running"
+		w.Header().Set("Retry-After", "1")
+	} else if errors.Is(err, errQWeatherTestRateLimited) {
+		status = http.StatusTooManyRequests
+		code = "qweather_test_rate_limited"
+		message = "Too many QWeather connection tests; try again later"
+		w.Header().Set("Retry-After", "60")
 	} else {
 		var upstream *qweather.UpstreamError
 		if errors.As(err, &upstream) {
@@ -619,6 +695,10 @@ func (h *Handler) writeTestError(w http.ResponseWriter, r *http.Request, err err
 				status = http.StatusTooManyRequests
 				code = "qweather_rate_limited"
 				message = "QWeather request limit was reached; try again later"
+				if upstream.Delay > 0 {
+					seconds := (upstream.Delay + time.Second - 1) / time.Second
+					w.Header().Set("Retry-After", strconv.FormatInt(int64(seconds), 10))
+				}
 			case upstream.HTTPStatus >= 500 || strings.HasPrefix(upstream.Code, "5"):
 				code = "qweather_unavailable"
 				message = "QWeather is temporarily unavailable"
@@ -631,22 +711,26 @@ func (h *Handler) writeTestError(w http.ResponseWriter, r *http.Request, err err
 	httpapi.WriteError(w, r, status, code, message)
 }
 
-func (h *Handler) saveAndApply(w http.ResponseWriter, r *http.Request,
-	previous, candidate state.State) bool {
-	if err := h.store.Save(candidate); err != nil {
+func (h *Handler) saveAndActivate(w http.ResponseWriter, r *http.Request,
+	candidate state.State, prepared platform.PreparedChange) bool {
+	writeResult, err := h.store.Save(candidate)
+	if err != nil {
 		httpapi.WriteError(w, r, http.StatusInternalServerError,
 			"state_write_failed", "could not save application state")
 		return false
 	}
-	if err := h.runtime.Apply(candidate); err != nil {
-		_ = h.store.Save(previous)
-		_ = h.runtime.Apply(previous)
-		h.logger.Error("activate saved runtime failed", "error", err)
-		httpapi.WriteError(w, r, http.StatusInternalServerError,
-			"runtime_apply_failed", "new settings were not activated")
-		return false
-	}
+	h.reportWriteResult(w, r, writeResult)
+	prepared.Activate()
 	return true
+}
+
+func (h *Handler) reportWriteResult(w http.ResponseWriter, r *http.Request, result state.WriteResult) {
+	if result.DurabilityConfirmed {
+		return
+	}
+	w.Header().Set(stateWarningHeader, stateWarningValue)
+	h.logger.Error("state durability could not be confirmed",
+		"request_id", httpapi.RequestID(r.Context()), "error", result.DurabilityWarning)
 }
 
 func (h *Handler) acquirePasswordSlot(w http.ResponseWriter, r *http.Request) bool {

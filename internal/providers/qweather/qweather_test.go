@@ -3,6 +3,7 @@ package qweather
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
@@ -90,6 +91,45 @@ func TestSignerProducesValidEdDSAJWT(t *testing.T) {
 	if claims["sub"] != "project" || int64(claims["iat"].(float64)) != fixedTime.Add(-30*time.Second).Unix() ||
 		int64(claims["exp"].(float64)) != fixedTime.Add(5*time.Minute).Unix() {
 		t.Fatalf("unexpected claims %#v", claims)
+	}
+}
+
+func TestPublicKeyFingerprintAndProviderMetadata(t *testing.T) {
+	privateKeyPEM, publicKey := testPrivateKey(t)
+	fingerprint, err := PublicKeyFingerprint(privateKeyPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := sha256.Sum256(publicKey)
+	if fingerprint != base64.RawURLEncoding.EncodeToString(expected[:]) {
+		t.Fatalf("unexpected fingerprint %q", fingerprint)
+	}
+	if _, err := PublicKeyFingerprint([]byte("not PEM")); err == nil {
+		t.Fatal("invalid key was accepted")
+	}
+	client := testClient(t, "http://api.example.com", privateKeyPEM)
+	if source := client.Source(); source.ID != "qweather" || source.AttributionURL == "" {
+		t.Fatalf("unexpected source %#v", source)
+	}
+	upstream := &UpstreamError{HTTPStatus: http.StatusBadRequest, Delay: time.Minute}
+	if upstream.Error() != "qweather returned HTTP status 400" || upstream.RetryDelay() != time.Minute {
+		t.Fatalf("unexpected upstream error behavior: %s %s", upstream, upstream.RetryDelay())
+	}
+	upstream.Code = "429"
+	if upstream.Error() != "qweather returned code 429" {
+		t.Fatalf("unexpected provider-code error %q", upstream.Error())
+	}
+}
+
+func TestNewRejectsInvalidConfiguration(t *testing.T) {
+	privateKeyPEM, _ := testPrivateKey(t)
+	if _, err := New("not-a-url", privateKeyPEM, "credential", "project", "zh", "m",
+		time.Second, time.Minute); err == nil {
+		t.Fatal("invalid base URL was accepted")
+	}
+	if _, err := New("https://api.example.com", []byte("invalid"), "credential", "project", "zh", "m",
+		time.Second, time.Minute); err == nil {
+		t.Fatal("invalid private key was accepted")
 	}
 }
 
@@ -271,8 +311,11 @@ func TestClientHonorsRateLimitAndResponseBound(t *testing.T) {
 		client := testClient(t, server.URL, privateKeyPEM)
 		_, err := client.Fetch(context.Background(), weather.KindCurrent, location.Point{})
 		var upstreamError *UpstreamError
-		if !errors.As(err, &upstreamError) || upstreamError.RetryAfter != 2*time.Minute {
+		if !errors.As(err, &upstreamError) || upstreamError.Delay != 2*time.Minute {
 			t.Fatalf("unexpected error %#v", err)
+		}
+		if upstreamError.Class != ErrorRateLimit || !errors.Is(client.Ready(), ErrCircuitOpen) {
+			t.Fatalf("rate limit did not open account block: %#v", upstreamError)
 		}
 	})
 	t.Run("oversized", func(t *testing.T) {
@@ -288,6 +331,143 @@ func TestClientHonorsRateLimitAndResponseBound(t *testing.T) {
 	})
 }
 
+func TestClientDoesNotGloballyBlockBadRequest(t *testing.T) {
+	privateKeyPEM, _ := testPrivateKey(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	defer server.Close()
+	client := testClient(t, server.URL, privateKeyPEM)
+	_, err := client.Fetch(context.Background(), weather.KindCurrent, location.Point{})
+	var upstream *UpstreamError
+	if !errors.As(err, &upstream) || upstream.Class != ErrorBadRequest ||
+		upstream.Delay != 15*time.Minute {
+		t.Fatalf("unexpected bad-request classification: %#v", err)
+	}
+	if errors.Is(client.Ready(), ErrCircuitOpen) {
+		t.Fatal("bad request opened account circuit")
+	}
+}
+
+func TestClientBusinessRateLimitUsesDefaultAccountBlock(t *testing.T) {
+	privateKeyPEM, _ := testPrivateKey(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"code":"429"}`))
+	}))
+	defer server.Close()
+	client := testClient(t, server.URL, privateKeyPEM)
+	_, err := client.Fetch(context.Background(), weather.KindCurrent, location.Point{})
+	var upstream *UpstreamError
+	if !errors.As(err, &upstream) || upstream.Class != ErrorRateLimit || upstream.Delay != time.Minute {
+		t.Fatalf("unexpected business rate limit: %#v", err)
+	}
+	if !errors.Is(client.Ready(), ErrCircuitOpen) {
+		t.Fatalf("business rate limit did not block account: %v", client.Ready())
+	}
+}
+
+func TestClientBusinessRateLimitHonorsRetryAfter(t *testing.T) {
+	privateKeyPEM, _ := testPrivateKey(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "120")
+		_, _ = w.Write([]byte(`{"code":"429"}`))
+	}))
+	defer server.Close()
+	client := testClient(t, server.URL, privateKeyPEM)
+	_, err := client.Fetch(context.Background(), weather.KindCurrent, location.Point{})
+	var upstream *UpstreamError
+	if !errors.As(err, &upstream) || upstream.Class != ErrorRateLimit || upstream.Delay != 2*time.Minute {
+		t.Fatalf("unexpected business rate limit: %#v", err)
+	}
+}
+
+func TestClientLimitsActiveUpstreamConcurrency(t *testing.T) {
+	privateKeyPEM, _ := testPrivateKey(t)
+	var active atomic.Int32
+	var maximum atomic.Int32
+	started := make(chan struct{}, maximumConcurrency)
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		current := active.Add(1)
+		for {
+			old := maximum.Load()
+			if current <= old || maximum.CompareAndSwap(old, current) {
+				break
+			}
+		}
+		started <- struct{}{}
+		<-release
+		active.Add(-1)
+		_, _ = w.Write([]byte(currentFixture))
+	}))
+	defer server.Close()
+	client := testClient(t, server.URL, privateKeyPEM)
+	const callers = maximumConcurrency + 4
+	results := make(chan error, callers)
+	for range callers {
+		go func() {
+			_, err := client.Fetch(context.Background(), weather.KindCurrent, location.Point{})
+			results <- err
+		}()
+	}
+	for range maximumConcurrency {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("upstream concurrency did not reach configured capacity")
+		}
+	}
+	if got := maximum.Load(); got != maximumConcurrency {
+		t.Fatalf("unexpected active concurrency %d", got)
+	}
+	close(release)
+	for range callers {
+		if err := <-results; err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestClientSemaphoreWaitHonorsContextCancellation(t *testing.T) {
+	privateKeyPEM, _ := testPrivateKey(t)
+	started := make(chan struct{}, maximumConcurrency)
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		started <- struct{}{}
+		<-release
+		_, _ = w.Write([]byte(currentFixture))
+	}))
+	defer server.Close()
+	client := testClient(t, server.URL, privateKeyPEM)
+	for range maximumConcurrency {
+		go func() { _, _ = client.Fetch(context.Background(), weather.KindCurrent, location.Point{}) }()
+	}
+	for range maximumConcurrency {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("upstream requests did not start")
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := client.Fetch(ctx, weather.KindCurrent, location.Point{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled semaphore wait returned %v", err)
+	}
+	close(release)
+}
+
+func TestClientCloseMarksProviderUnavailable(t *testing.T) {
+	privateKeyPEM, _ := testPrivateKey(t)
+	client := testClient(t, "http://api.example.com", privateKeyPEM)
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if !errors.Is(client.Ready(), ErrClosed) {
+		t.Fatalf("closed client readiness = %v", client.Ready())
+	}
+}
+
 func TestParsersRejectMalformedRequiredFields(t *testing.T) {
 	for _, value := range []string{"invalid", "NaN", "+Inf", "-Inf"} {
 		malformed := strings.Replace(currentFixture, `"temp":"28"`, `"temp":"`+value+`"`, 1)
@@ -299,6 +479,41 @@ func TestParsersRejectMalformedRequiredFields(t *testing.T) {
 	var status commonResponse
 	if err := json.Unmarshal([]byte(badCode), &status); err != nil || status.Code != "403" {
 		t.Fatalf("embedded response status failed: %#v %v", status, err)
+	}
+}
+
+func TestParsersRejectMalformedShapesAndAllowMissingOptionalValues(t *testing.T) {
+	if _, err := parseCurrent([]byte("{")); err == nil {
+		t.Fatal("malformed current JSON was accepted")
+	}
+	if _, err := parseHourly([]byte(`{"updateTime":"2026-08-02T10:00+08:00","hourly":[]}`)); err == nil {
+		t.Fatal("empty hourly forecast was accepted")
+	}
+	if _, err := parseDaily([]byte(`{"updateTime":"2026-08-02T10:00+08:00","daily":[]}`)); err == nil {
+		t.Fatal("empty daily forecast was accepted")
+	}
+	missingCondition := strings.Replace(currentFixture, `"icon":"101"`, `"icon":""`, 1)
+	if _, err := parseCurrent([]byte(missingCondition)); err == nil {
+		t.Fatal("missing current condition was accepted")
+	}
+	missingOptional := strings.Replace(strings.Replace(currentFixture,
+		`"cloud":"80"`, `"cloud":""`, 1), `"dew":"22"`, `"dew":""`, 1)
+	result, err := parseCurrent([]byte(missingOptional))
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := result.Data.(weather.Current)
+	if current.CloudPercent != nil || current.DewPointC != nil {
+		t.Fatalf("missing optional values were not preserved: %#v", current)
+	}
+	if _, err := parseTime("invalid", "time"); err == nil {
+		t.Fatal("invalid timestamp was accepted")
+	}
+	if value, err := parseClock("2026-08-02", "", time.Now(), "clock"); err != nil || value != nil {
+		t.Fatalf("empty clock returned %#v %v", value, err)
+	}
+	if _, err := parseClock("2026-08-02", "invalid", time.Now(), "clock"); err == nil {
+		t.Fatal("invalid clock was accepted")
 	}
 }
 
@@ -338,6 +553,23 @@ func TestRetryAfterCapsValues(t *testing.T) {
 	now := time.Date(2026, 8, 2, 0, 0, 0, 0, time.UTC)
 	if got := retryAfter(strconv.Itoa(3600), now); got != 15*time.Minute {
 		t.Fatalf("unexpected cap %s", got)
+	}
+	if got := retryAfter("", now); got != time.Minute {
+		t.Fatalf("unexpected default %s", got)
+	}
+	if got := retryAfter(now.Add(2*time.Minute).Format(http.TimeFormat), now); got != 2*time.Minute {
+		t.Fatalf("unexpected HTTP-date delay %s", got)
+	}
+}
+
+func TestSleepContextCompletesAndCancels(t *testing.T) {
+	if err := sleepContext(context.Background(), time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := sleepContext(ctx, time.Minute); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled sleep returned %v", err)
 	}
 }
 

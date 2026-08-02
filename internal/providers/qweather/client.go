@@ -22,19 +22,36 @@ import (
 )
 
 const (
-	maxResponseSize = 1024 * 1024
-	retryBaseDelay  = 200 * time.Millisecond
+	maxResponseSize       = 1024 * 1024
+	retryBaseDelay        = 200 * time.Millisecond
+	maximumConcurrency    = 8
+	badRequestRetryDelay  = 15 * time.Minute
+	defaultRateLimitDelay = time.Minute
 )
 
 // ErrCircuitOpen means authentication or configuration failures are cooling down.
 var ErrCircuitOpen = errors.New("qweather configuration circuit is open")
 
+// ErrClosed means the provider lifecycle has ended.
+var ErrClosed = errors.New("qweather client is closed")
+
+// ErrorClass identifies the safe operational category of an upstream failure.
+type ErrorClass string
+
+const (
+	ErrorBadRequest  ErrorClass = "bad_request"
+	ErrorCredentials ErrorClass = "credentials"
+	ErrorRateLimit   ErrorClass = "rate_limit"
+	ErrorServer      ErrorClass = "server"
+	ErrorResponse    ErrorClass = "response"
+)
+
 // UpstreamError describes a safe-to-log provider failure.
 type UpstreamError struct {
 	HTTPStatus int
 	Code       string
-	RetryAfter time.Duration
-	Temporary  bool
+	Class      ErrorClass
+	Delay      time.Duration
 }
 
 func (e *UpstreamError) Error() string {
@@ -46,7 +63,7 @@ func (e *UpstreamError) Error() string {
 
 // RetryDelay exposes a provider-request cooldown without leaking response data.
 func (e *UpstreamError) RetryDelay() time.Duration {
-	return e.RetryAfter
+	return e.Delay
 }
 
 // Client calls one account-specific QWeather API host.
@@ -59,9 +76,11 @@ type Client struct {
 	circuitCooldown time.Duration
 	now             func() time.Time
 	sleep           func(context.Context, time.Duration) error
+	slots           chan struct{}
 
 	circuitMu    sync.Mutex
 	blockedUntil time.Time
+	closed       bool
 }
 
 // Source returns the device-facing QWeather attribution.
@@ -101,6 +120,7 @@ func New(baseURL string, privateKeyPEM []byte, credentialID, projectID,
 		circuitCooldown: circuitCooldown,
 		now:             time.Now,
 		sleep:           sleepContext,
+		slots:           make(chan struct{}, maximumConcurrency),
 	}, nil
 }
 
@@ -108,6 +128,9 @@ func New(baseURL string, privateKeyPEM []byte, credentialID, projectID,
 func (c *Client) Ready() error {
 	c.circuitMu.Lock()
 	defer c.circuitMu.Unlock()
+	if c.closed {
+		return ErrClosed
+	}
 	if c.now().Before(c.blockedUntil) {
 		return ErrCircuitOpen
 	}
@@ -128,6 +151,10 @@ func (c *Client) Fetch(ctx context.Context, kind weather.Kind,
 	default:
 		return weather.ProviderResult{}, fmt.Errorf("unsupported weather kind %q", kind)
 	}
+	if err := c.acquire(ctx); err != nil {
+		return weather.ProviderResult{}, err
+	}
+	defer func() { <-c.slots }()
 
 	body, err := c.request(ctx, path, point)
 	if err != nil {
@@ -143,6 +170,24 @@ func (c *Client) Fetch(ctx context.Context, kind weather.Kind,
 	default:
 		return weather.ProviderResult{}, fmt.Errorf("unsupported weather kind %q", kind)
 	}
+}
+
+func (c *Client) acquire(ctx context.Context) error {
+	select {
+	case c.slots <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// Close ends the provider lifecycle and closes idle upstream connections.
+func (c *Client) Close() error {
+	c.circuitMu.Lock()
+	c.closed = true
+	c.circuitMu.Unlock()
+	c.httpClient.CloseIdleConnections()
+	return nil
 }
 
 func (c *Client) request(ctx context.Context, path string,
@@ -208,23 +253,25 @@ func (c *Client) requestOnce(ctx context.Context, endpoint string) ([]byte, bool
 	}
 
 	if response.StatusCode == http.StatusTooManyRequests {
-		return nil, false, &UpstreamError{
-			HTTPStatus: response.StatusCode,
-			RetryAfter: retryAfter(response.Header.Get("Retry-After"), c.now()),
-			Temporary:  true,
-		}
+		delay := retryAfter(response.Header.Get("Retry-After"), c.now())
+		c.blockFor(delay)
+		return nil, false, &UpstreamError{HTTPStatus: response.StatusCode,
+			Class: ErrorRateLimit, Delay: delay}
 	}
-	if response.StatusCode == http.StatusBadRequest ||
-		response.StatusCode == http.StatusUnauthorized ||
-		response.StatusCode == http.StatusForbidden {
-		c.openCircuit()
-		return nil, false, &UpstreamError{HTTPStatus: response.StatusCode}
+	if response.StatusCode == http.StatusBadRequest {
+		return nil, false, &UpstreamError{HTTPStatus: response.StatusCode,
+			Class: ErrorBadRequest, Delay: badRequestRetryDelay}
+	}
+	if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
+		c.blockFor(c.circuitCooldown)
+		return nil, false, &UpstreamError{HTTPStatus: response.StatusCode,
+			Class: ErrorCredentials, Delay: c.circuitCooldown}
 	}
 	if response.StatusCode >= 500 {
-		return nil, true, &UpstreamError{HTTPStatus: response.StatusCode, Temporary: true}
+		return nil, true, &UpstreamError{HTTPStatus: response.StatusCode, Class: ErrorServer}
 	}
 	if response.StatusCode != http.StatusOK {
-		return nil, false, &UpstreamError{HTTPStatus: response.StatusCode}
+		return nil, false, &UpstreamError{HTTPStatus: response.StatusCode, Class: ErrorResponse}
 	}
 
 	var status commonResponse
@@ -232,14 +279,21 @@ func (c *Client) requestOnce(ctx context.Context, endpoint string) ([]byte, bool
 		return nil, false, fmt.Errorf("decode qweather status: %w", err)
 	}
 	if status.Code != "200" {
-		errorValue := &UpstreamError{Code: status.Code}
+		errorValue := &UpstreamError{Code: status.Code, Class: ErrorResponse}
 		retry := false
-		if status.Code == "400" || status.Code == "401" || status.Code == "403" {
-			c.openCircuit()
+		if status.Code == "400" {
+			errorValue.Class = ErrorBadRequest
+			errorValue.Delay = badRequestRetryDelay
+		} else if status.Code == "401" || status.Code == "403" {
+			errorValue.Class = ErrorCredentials
+			errorValue.Delay = c.circuitCooldown
+			c.blockFor(c.circuitCooldown)
 		} else if status.Code == "429" {
-			errorValue.Temporary = true
+			errorValue.Class = ErrorRateLimit
+			errorValue.Delay = retryAfter(response.Header.Get("Retry-After"), c.now())
+			c.blockFor(errorValue.Delay)
 		} else if strings.HasPrefix(status.Code, "5") {
-			errorValue.Temporary = true
+			errorValue.Class = ErrorServer
 			retry = true
 		}
 		return nil, retry, errorValue
@@ -247,9 +301,12 @@ func (c *Client) requestOnce(ctx context.Context, endpoint string) ([]byte, bool
 	return body, false, nil
 }
 
-func (c *Client) openCircuit() {
+func (c *Client) blockFor(delay time.Duration) {
 	c.circuitMu.Lock()
-	c.blockedUntil = c.now().Add(c.circuitCooldown)
+	until := c.now().Add(delay)
+	if until.After(c.blockedUntil) {
+		c.blockedUntil = until
+	}
 	c.circuitMu.Unlock()
 }
 

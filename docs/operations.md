@@ -24,7 +24,7 @@ MT_PUBLIC_HOST=api.example.com docker compose -f deploy/compose.https.yaml pull
 MT_PUBLIC_HOST=api.example.com docker compose -f deploy/compose.https.yaml up -d
 ```
 
-Caddy 与源站只通过内部 Docker 网络通信，源站不发布宿主端口。模板设置 `MT_ADMIN_BEHIND_HTTPS_PROXY=true`，使管理 Cookie 带 `Secure`；服务不读取代理协议或位置头。首次初始化页面公开前，应使用防火墙或上游访问策略限制管理员访问。
+Caddy 与源站只通过内部 Docker 网络通信，源站不发布宿主端口。模板同时设置 `MT_ADMIN_BEHIND_HTTPS_PROXY=true` 和 `MT_ADMIN_PUBLIC_ORIGINS=https://${MT_PUBLIC_HOST}`，因此管理 Cookie 带 `Secure`，同源校验也不依赖代理传给源站的内部 `Host`。首次初始化页面公开前，应使用防火墙或上游访问策略限制管理员访问。
 
 ## 现有反向代理
 
@@ -32,9 +32,11 @@ Caddy 与源站只通过内部 Docker 网络通信，源站不发布宿主端口
 
 - 源站保持普通 HTTP，仅允许代理网络访问。
 - 设置 `MT_ADMIN_ALLOW_INSECURE_HTTP=false` 和 `MT_ADMIN_BEHIND_HTTPS_PROXY=true`。
-- 保留原始 `Host`，使同源校验使用浏览器看到的主机名。
+- 设置 `MT_ADMIN_PUBLIC_ORIGINS=https://api.example.com`；多个入口使用逗号分隔，最多 16 个。
 - 保留天气请求中的 `Authorization` 和 `X-MT-Location-*` 请求头。
 - 不需要转发 `X-Forwarded-For` 或任何代理地理位置头；服务不会读取它们。
+
+Origin 必须是完整 HTTPS Origin，可包含 IPv4、带方括号的 IPv6 和非默认端口；主机名大小写及默认 `:443` 会被规范化。路径、查询、片段、用户信息、HTTP 和重复项会导致服务启动失败。Cloudflare Tunnel 与其他代理不再需要覆盖源站 `Host`；服务不会读取 `Forwarded`、`X-Forwarded-Host` 或 `X-Forwarded-Proto`。修改白名单后重启容器，并刷新管理页面取得新的 CSRF token。
 
 `deploy/examples/` 提供 Nginx、Traefik 和 Cloudflare Tunnel 的普通 HTTPS 接入片段。入口实现不改变天气 API 的处理语义。
 
@@ -80,6 +82,7 @@ curl http://127.0.0.1:8080/health/ready
 - 缺少或非法请求位置：天气接口返回 400，不调用 QWeather。
 - 位置切换过快：天气接口返回 429，并附带 `Retry-After`。
 - QWeather 认证熔断：live 为 200，ready 为 503；已有缓存允许时仍可返回 `stale=true`。
+- 状态目录同步未确认：写操作仍成功并返回 `X-MT-State-Warning: durability_unconfirmed`，管理概览持续显示告警；检查状态卷后执行下一次管理写入以重新确认。
 
 管理页面更新 QWeather 时会先真实请求实时天气。验证或写盘失败不会替换原配置。日志只记录事件类别、请求 ID、路径和安全错误，不记录请求体、IP、坐标、位置元数据或凭据。
 

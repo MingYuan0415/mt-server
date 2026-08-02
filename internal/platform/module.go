@@ -18,3 +18,9 @@ type Module interface {
 	Ready() error
 	Close(context.Context) error
 }
+
+// PreparedChange is a validated runtime update that can be activated without failure.
+type PreparedChange interface {
+	Activate()
+	Discard()
+}

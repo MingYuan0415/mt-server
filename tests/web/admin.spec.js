@@ -31,6 +31,9 @@ async function installBackend(page, initialConfigured) {
     sessionCSRF: "session-csrf-token",
     qweather: { ...qweather },
     tokens: [{ id: "device_initial", name: "初始设备", created_at: "2026-08-02T00:00:00Z" }],
+    stateDurability: initialConfigured ? "confirmed" : "not_applicable",
+    warnNextWrite: false,
+    failNextSessionLoad: false,
     writes: []
   };
 
@@ -40,12 +43,19 @@ async function installBackend(page, initialConfigured) {
     const path = url.pathname.replace("/admin/api/v1", "");
     const method = request.method();
     const write = !["GET", "HEAD"].includes(method);
-    const json = (status, body, headers = {}) => route.fulfill({
-      status,
-      contentType: "application/json",
-      headers: { "Cache-Control": "private, no-store", ...headers },
-      body: body === undefined ? "" : JSON.stringify(body)
-    });
+    const json = (status, body, headers = {}) => {
+      if (write && backend.warnNextWrite) {
+        headers["X-MT-State-Warning"] = "durability_unconfirmed";
+        backend.warnNextWrite = false;
+        backend.stateDurability = "unconfirmed";
+      }
+      return route.fulfill({
+        status,
+        contentType: "application/json",
+        headers: { "Cache-Control": "private, no-store", ...headers },
+        body: body === undefined ? "" : JSON.stringify(body)
+      });
+    };
 
     if (path === "/status" && method === "GET") {
       return json(200, {
@@ -53,6 +63,7 @@ async function installBackend(page, initialConfigured) {
         status: backend.configured ? "ready" : "setup_required",
         version: "web-test",
         secure_transport: false,
+        state_durability: backend.stateDurability,
         csrf_token: backend.publicCSRF
       });
     }
@@ -69,6 +80,7 @@ async function installBackend(page, initialConfigured) {
     if (path === "/setup" && method === "POST") {
       backend.configured = true;
       backend.loggedIn = true;
+      backend.stateDurability = "confirmed";
       return json(201, {
         csrf_token: backend.sessionCSRF,
         device_token: "mt_first-device-token",
@@ -78,6 +90,10 @@ async function installBackend(page, initialConfigured) {
       }, { "Set-Cookie": "mt_admin_session=browser-test; Path=/admin/; HttpOnly; SameSite=Strict" });
     }
     if (path === "/session" && method === "GET") {
+      if (backend.failNextSessionLoad) {
+        backend.failNextSessionLoad = false;
+        return json(500, { error: { code: "state_unavailable", message: "temporary failure" } });
+      }
       return backend.loggedIn ? json(200, { csrf_token: backend.sessionCSRF }) :
         json(401, { error: { code: "admin_unauthorized", message: "需要登录" } });
     }
@@ -203,11 +219,13 @@ test("@desktop completes setup and rotates configuration", async ({ page }, test
   await expect(page.locator("#qweather-verification")).toContainText("多云");
 
   await page.getByRole("button", { name: "设备令牌" }).click();
+  backend.warnNextWrite = true;
   await page.locator('#token-form [name="name"]').fill("轮换设备");
   await page.getByRole("button", { name: "创建令牌" }).click();
   await expect(page.locator("#raw-token")).toHaveText("mt_second-device-token");
   await page.getByRole("button", { name: "我已保存" }).click();
   await expect(page.locator(".token-item")).toHaveCount(2);
+  await expect(page.locator("#durability-warning")).toContainText("尚未确认目录持久性");
 
   await expectStableLayout(page);
   await expectNoBrowserStorage(page);
@@ -229,4 +247,82 @@ test("@mobile logs in and keeps the settings layout usable", async ({ page }, te
   await expectStableLayout(page);
   await expectNoBrowserStorage(page);
   await page.screenshot({ path: testInfo.outputPath("mobile-qweather.png"), fullPage: true });
+});
+
+test("@desktop real management handler completes the lifecycle", async ({ page }) => {
+  await page.goto("/admin/");
+  await expect(page.getByRole("heading", { name: "连接和风天气" })).toBeVisible();
+
+  const setup = page.locator("#setup-form");
+  await setup.locator('[name="password"]').fill("correct horse battery staple");
+  await setup.locator('[name="password_confirm"]').fill("correct horse battery staple");
+  await setup.locator('[name="api_host"]').fill(qweather.api_host);
+  await setup.locator('[name="project_id"]').fill(qweather.project_id);
+  await setup.locator('[name="credential_id"]').fill(qweather.credential_id);
+  await setup.locator('[name="private_key_pem"]').fill("test-private-key");
+  await setup.locator('[name="test_latitude"]').fill("30.2");
+  await setup.locator('[name="test_longitude"]').fill("120.1");
+  await setup.getByRole("button", { name: "测试并完成初始化" }).click();
+
+  await expect(page.locator("#token-dialog")).toBeVisible();
+  await expect(page.locator("#raw-token")).toContainText("mt_");
+  const firstToken = await page.locator("#raw-token").textContent();
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#token-dialog")).toBeVisible();
+  await expect(page.locator("#raw-token")).toHaveText(firstToken);
+  await page.getByRole("button", { name: "我已保存" }).click();
+
+  await page.getByRole("button", { name: "和风天气" }).click();
+  await page.locator('#qweather-form [name="project_id"]').fill("project-next");
+  await page.locator('#qweather-form [name="test_latitude"]').fill("30.2");
+  await page.locator('#qweather-form [name="test_longitude"]').fill("120.1");
+  await page.getByRole("button", { name: "测试并保存" }).click();
+  await expect(page.locator("#qweather-message")).toContainText("已保存并生效");
+
+  await page.getByRole("button", { name: "设备令牌" }).click();
+  await page.locator('#token-form [name="name"]').fill("轮换设备");
+  await page.getByRole("button", { name: "创建令牌" }).click();
+  await expect(page.locator("#raw-token")).toContainText("mt_");
+  await page.getByRole("button", { name: "我已保存" }).click();
+  await expect(page.locator(".token-item")).toHaveCount(2);
+
+  await page.getByRole("button", { name: "账户" }).click();
+  await page.locator('#password-form [name="current_password"]').fill("correct horse battery staple");
+  await page.locator('#password-form [name="new_password"]').fill("replacement password value");
+  await page.locator('#password-form [name="new_password_confirm"]').fill("replacement password value");
+  await page.getByRole("button", { name: "更新密码" }).click();
+  await expect(page.locator("#login-view")).toBeVisible();
+  await page.locator('#login-form [name="password"]').fill("replacement password value");
+  await page.getByRole("button", { name: "登录" }).click();
+  await expect(page.locator("#dashboard-view")).toBeVisible();
+  await expectNoBrowserStorage(page);
+});
+
+test("@desktop setup token survives dashboard refresh failure", async ({ page }) => {
+  const backend = await installBackend(page, false);
+  await page.goto("/admin/");
+  const setup = page.locator("#setup-form");
+  await setup.locator('[name="password"]').fill("correct horse battery staple");
+  await setup.locator('[name="password_confirm"]').fill("correct horse battery staple");
+  await setup.locator('[name="api_host"]').fill(qweather.api_host);
+  await setup.locator('[name="project_id"]').fill(qweather.project_id);
+  await setup.locator('[name="credential_id"]').fill(qweather.credential_id);
+  await setup.locator('[name="private_key_pem"]').fill("test-ed25519-key-material");
+  await setup.locator('[name="test_latitude"]').fill("30.2");
+  await setup.locator('[name="test_longitude"]').fill("120.1");
+  backend.failNextSessionLoad = true;
+  await setup.getByRole("button", { name: "测试并完成初始化" }).click();
+  await expect(page.locator("#token-dialog")).toBeVisible();
+  await expect(page.locator("#raw-token")).toHaveText("mt_first-device-token");
+  await expect(page.locator("#setup-message")).toContainText("初始化已完成，但仪表盘刷新失败");
+});
+
+test("@desktop insecure non-loopback HTTP asks for manual test coordinates", async ({ page }) => {
+  await installBackend(page, false);
+  await page.goto("http://insecure.example.test:18080/admin/");
+  const setup = page.locator("#setup-form");
+  await setup.getByRole("button", { name: "使用浏览器临时位置" }).click();
+  await expect(page.locator("#setup-message")).toContainText("非安全 HTTP 页面");
+  await expect(setup.locator('[name="test_latitude"]')).toHaveValue("");
+  await expect(setup.locator('[name="test_longitude"]')).toHaveValue("");
 });

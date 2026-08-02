@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"io"
 	"log/slog"
 	"net/http"
@@ -36,5 +37,24 @@ func TestRequestContextRecoversPanics(t *testing.T) {
 	if recorder.Code != http.StatusInternalServerError ||
 		!strings.Contains(recorder.Body.String(), "internal_error") {
 		t.Fatalf("unexpected panic response %d %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestRequestContextLogsStatusBytesAndDoesNotAppendAfterCommit(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	handler := RequestContext(logger, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("partial"))
+		panic("after commit")
+	}))
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/committed", nil))
+	if recorder.Code != http.StatusOK || recorder.Body.String() != "partial" {
+		t.Fatalf("panic after commit damaged response: %d %q", recorder.Code, recorder.Body.String())
+	}
+	logValue := logs.String()
+	if !strings.Contains(logValue, "status=200") || !strings.Contains(logValue, "response_bytes=7") ||
+		!strings.Contains(logValue, "response_committed=true") {
+		t.Fatalf("request completion log missing fields: %s", logValue)
 	}
 }

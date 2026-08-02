@@ -71,6 +71,7 @@ button:disabled { cursor: wait; opacity: .58; }
 .message { padding: 11px 13px; border-left: 3px solid var(--focus); background: #eaf3f9; color: #24475d; font-size: 13px; line-height: 1.5; }
 .message.error { border-color: var(--danger); background: #fbefef; color: #782828; }
 .message.success { border-color: var(--accent); background: #eaf6f1; color: #155a45; }
+.message.warning { border-color: #a36c16; background: #fff7e6; color: #6e4810; }
 .test-location-actions {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
   padding: 12px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);

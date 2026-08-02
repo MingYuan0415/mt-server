@@ -11,4 +11,5 @@ type Provider interface {
 	Source() Source
 	Fetch(context.Context, Kind, location.Point) (ProviderResult, error)
 	Ready() error
+	Close() error
 }

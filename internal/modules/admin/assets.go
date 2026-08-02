@@ -12,7 +12,7 @@ func (h *Handler) registerAssets(mux *http.ServeMux) {
 	mux.HandleFunc("GET /admin", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/admin/", http.StatusPermanentRedirect)
 	})
-	mux.HandleFunc("GET /admin/", serveAsset("assets/index.html", "text/html; charset=utf-8"))
+	mux.HandleFunc("GET /admin/{$}", serveAsset("assets/index.html", "text/html; charset=utf-8"))
 	mux.HandleFunc("GET /admin/assets/styles.css", serveAsset("assets/styles.css", "text/css; charset=utf-8"))
 	mux.HandleFunc("GET /admin/assets/app.js", serveAsset("assets/app.js", "text/javascript; charset=utf-8"))
 }

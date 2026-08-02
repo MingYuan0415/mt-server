@@ -1,6 +1,10 @@
 package config
 
-import "testing"
+import (
+	"fmt"
+	"strings"
+	"testing"
+)
 
 func TestLoadDefaults(t *testing.T) {
 	value, err := load(func(string) string { return "" })
@@ -11,6 +15,64 @@ func TestLoadDefaults(t *testing.T) {
 		value.StateDir != "/var/lib/mt-server" || value.AdminAllowInsecureHTTP ||
 		value.AdminBehindHTTPSProxy {
 		t.Fatalf("unexpected defaults %#v", value)
+	}
+}
+
+func TestLoadPublicOrigins(t *testing.T) {
+	values := map[string]string{
+		"MT_ADMIN_BEHIND_HTTPS_PROXY": "true",
+		"MT_ADMIN_PUBLIC_ORIGINS":     "https://API.Example.com:443, https://[2001:db8::1]:8443",
+	}
+	value, err := load(func(name string) string { return values[name] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"https://api.example.com", "https://[2001:db8::1]:8443"}
+	if fmt.Sprint(value.AdminPublicOrigins) != fmt.Sprint(want) {
+		t.Fatalf("unexpected origins %#v", value.AdminPublicOrigins)
+	}
+}
+
+func TestLoadRejectsInvalidPublicOrigins(t *testing.T) {
+	invalid := []string{
+		"http://api.example.com",
+		"https://user@api.example.com",
+		"https://api.example.com/path",
+		"https://api.example.com?query=1",
+		"https://api.example.com#fragment",
+		"https://bad_host.example.com",
+		"https://-bad.example.com",
+		"https://api.example.com:",
+		"https://[2001:db8::1]:",
+		"https://api.example.com:65536",
+		"https://api.example.com,https://API.EXAMPLE.COM:443",
+		strings.Repeat("https://a.example.com,", maximumPublicOrigins) + "https://b.example.com",
+	}
+	for _, origins := range invalid {
+		t.Run(origins, func(t *testing.T) {
+			values := map[string]string{
+				"MT_ADMIN_BEHIND_HTTPS_PROXY": "true",
+				"MT_ADMIN_PUBLIC_ORIGINS":     origins,
+			}
+			if _, err := load(func(name string) string { return values[name] }); err == nil {
+				t.Fatal("expected public-origin validation failure")
+			}
+		})
+	}
+}
+
+func TestLoadPublicOriginsRequireStrictProxyMode(t *testing.T) {
+	for _, values := range []map[string]string{
+		{"MT_ADMIN_PUBLIC_ORIGINS": "https://api.example.com"},
+		{
+			"MT_ADMIN_PUBLIC_ORIGINS":      "https://api.example.com",
+			"MT_ADMIN_BEHIND_HTTPS_PROXY":  "true",
+			"MT_ADMIN_ALLOW_INSECURE_HTTP": "true",
+		},
+	} {
+		if _, err := load(func(name string) string { return values[name] }); err == nil {
+			t.Fatal("expected strict proxy-mode validation failure")
+		}
 	}
 }
 
