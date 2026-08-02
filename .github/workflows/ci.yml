@@ -32,9 +32,7 @@ jobs:
       - name: Build
         run: CGO_ENABLED=0 go build -trimpath ./cmd/mt-server
       - name: Lint workflows
-        run: |
-          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
-          actionlint
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
 
   web:
     runs-on: ubuntu-24.04
