@@ -1,0 +1,232 @@
+const { test, expect } = require("@playwright/test");
+
+const verification = {
+  source: { id: "qweather", name: "QWeather", attribution_url: "https://www.qweather.com/" },
+  location: { timezone: "Asia/Shanghai", source: "browser", provider: "browser", precision: "coarse" },
+  tested_at: "2026-08-02T01:00:00Z",
+  updated_at: "2026-08-02T00:55:00Z",
+  data: {
+    observed_at: "2026-08-02T00:50:00Z", temperature_c: 28, feels_like_c: 31,
+    condition_code: "101", condition_text: "多云", wind_degrees: 135,
+    wind_direction: "东南风", wind_scale: "2", wind_speed_kmh: 8,
+    humidity_percent: 72, precipitation_mm: 0, pressure_hpa: 1004, visibility_km: 16
+  }
+};
+
+const qweather = {
+  api_host: "account-id.re.qweatherapi.com",
+  project_id: "project-id",
+  credential_id: "credential-id",
+  private_key_configured: true,
+  public_key_fingerprint: "example-public-key-fingerprint",
+  language: "zh",
+  unit: "m"
+};
+
+async function installBackend(page, initialConfigured) {
+  const backend = {
+    configured: initialConfigured,
+    loggedIn: false,
+    publicCSRF: "public-csrf-token",
+    sessionCSRF: "session-csrf-token",
+    qweather: { ...qweather },
+    tokens: [{ id: "device_initial", name: "初始设备", created_at: "2026-08-02T00:00:00Z" }],
+    writes: []
+  };
+
+  await page.route("**/admin/api/v1/**", async route => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const path = url.pathname.replace("/admin/api/v1", "");
+    const method = request.method();
+    const write = !["GET", "HEAD"].includes(method);
+    const json = (status, body, headers = {}) => route.fulfill({
+      status,
+      contentType: "application/json",
+      headers: { "Cache-Control": "private, no-store", ...headers },
+      body: body === undefined ? "" : JSON.stringify(body)
+    });
+
+    if (path === "/status" && method === "GET") {
+      return json(200, {
+        configured: backend.configured,
+        status: backend.configured ? "ready" : "setup_required",
+        version: "web-test",
+        secure_transport: false,
+        csrf_token: backend.publicCSRF
+      });
+    }
+
+    if (write) {
+      backend.writes.push({
+        path,
+        csrf: request.headers()["x-csrf-token"] || "",
+        authorization: request.headers().authorization || "",
+        body: request.postDataJSON?.() || null
+      });
+    }
+
+    if (path === "/setup" && method === "POST") {
+      backend.configured = true;
+      backend.loggedIn = true;
+      return json(201, {
+        csrf_token: backend.sessionCSRF,
+        device_token: "mt_first-device-token",
+        device: backend.tokens[0],
+        qweather_public_key_fingerprint: qweather.public_key_fingerprint,
+        verification
+      }, { "Set-Cookie": "mt_admin_session=browser-test; Path=/admin/; HttpOnly; SameSite=Strict" });
+    }
+    if (path === "/session" && method === "GET") {
+      return backend.loggedIn ? json(200, { csrf_token: backend.sessionCSRF }) :
+        json(401, { error: { code: "admin_unauthorized", message: "需要登录" } });
+    }
+    if (path === "/session" && method === "POST") {
+      backend.loggedIn = true;
+      return json(200, { csrf_token: backend.sessionCSRF }, {
+        "Set-Cookie": "mt_admin_session=browser-test; Path=/admin/; HttpOnly; SameSite=Strict"
+      });
+    }
+    if (path === "/session" && method === "DELETE") {
+      backend.loggedIn = false;
+      return json(200, { status: "logged_out" });
+    }
+    if (path === "/settings/qweather" && method === "GET") return json(200, backend.qweather);
+    if (path === "/settings/qweather/test" && method === "POST") {
+      return json(200, { status: "ok", public_key_fingerprint: qweather.public_key_fingerprint, verification });
+    }
+    if (path === "/settings/qweather" && method === "PUT") {
+      backend.qweather = { ...backend.qweather, ...request.postDataJSON(), private_key_configured: true };
+      return json(200, { status: "saved", public_key_fingerprint: qweather.public_key_fingerprint, verification });
+    }
+    if (path === "/device-tokens" && method === "GET") return json(200, { tokens: backend.tokens });
+    if (path === "/device-tokens" && method === "POST") {
+      const token = { id: "device_second", name: request.postDataJSON().name, created_at: "2026-08-02T01:00:00Z" };
+      backend.tokens.push(token);
+      return json(201, { device_token: "mt_second-device-token", device: token });
+    }
+    if (path.startsWith("/device-tokens/") && method === "DELETE") {
+      const id = decodeURIComponent(path.slice("/device-tokens/".length));
+      backend.tokens = backend.tokens.filter(token => token.id !== id);
+      return json(204);
+    }
+    return json(404, { error: { code: "not_found", message: "not found" } });
+  });
+  return backend;
+}
+
+async function expectStableLayout(page) {
+  const result = await page.evaluate(() => {
+    const visible = element => {
+      const style = getComputedStyle(element);
+      const rect = element.getBoundingClientRect();
+      return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+    };
+    const controls = [...document.querySelectorAll("button, input, textarea, select")].filter(visible);
+    const overlaps = [];
+    for (let left = 0; left < controls.length; left++) {
+      for (let right = left + 1; right < controls.length; right++) {
+        const a = controls[left];
+        const b = controls[right];
+        if (a.contains(b) || b.contains(a)) continue;
+        const ar = a.getBoundingClientRect();
+        const br = b.getBoundingClientRect();
+        if (ar.left < br.right && ar.right > br.left && ar.top < br.bottom && ar.bottom > br.top) {
+          overlaps.push(`${a.tagName}:${a.textContent.trim()} / ${b.tagName}:${b.textContent.trim()}`);
+        }
+      }
+    }
+    return {
+      viewportOverflow: document.documentElement.scrollWidth > window.innerWidth + 1,
+      overlaps
+    };
+  });
+  expect(result).toEqual({ viewportOverflow: false, overlaps: [] });
+}
+
+async function expectNoBrowserStorage(page) {
+  const stored = await page.evaluate(async () => ({
+    local: Object.keys(localStorage),
+    session: Object.keys(sessionStorage),
+    databases: indexedDB.databases ? (await indexedDB.databases()).map(item => item.name) : []
+  }));
+  expect(stored).toEqual({ local: [], session: [], databases: [] });
+}
+
+test("@desktop completes setup and rotates configuration", async ({ page }, testInfo) => {
+  const backend = await installBackend(page, false);
+  await page.context().grantPermissions(["geolocation"]);
+  await page.context().setGeolocation({ latitude: 30.2, longitude: 120.1 });
+  await page.goto("/admin/");
+  await expect(page.getByRole("heading", { name: "连接和风天气" })).toBeVisible();
+
+  const setup = page.locator("#setup-form");
+  await setup.locator('[name="password"]').fill("correct horse battery staple");
+  await setup.locator('[name="password_confirm"]').fill("correct horse battery staple");
+  await setup.locator('[name="api_host"]').fill(qweather.api_host);
+  await setup.locator('[name="project_id"]').fill(qweather.project_id);
+  await setup.locator('[name="credential_id"]').fill(qweather.credential_id);
+  await setup.locator('[name="private_key_pem"]').fill("test-ed25519-key-material");
+  await setup.getByRole("button", { name: "使用浏览器临时位置" }).click();
+  await expect(setup.locator('[name="test_latitude"]')).toHaveValue("30.200000");
+  await expectStableLayout(page);
+  await page.screenshot({ path: testInfo.outputPath("desktop-setup.png"), fullPage: true });
+  await setup.getByRole("button", { name: "测试并完成初始化" }).click();
+
+  await expect(page.locator("#token-dialog")).toBeVisible();
+  await expect(page.locator("#raw-token")).toHaveText("mt_first-device-token");
+  await expect(page.locator("#dashboard-view")).toBeVisible();
+  expect(backend.writes[0]).toMatchObject({
+    path: "/setup",
+    csrf: backend.publicCSRF,
+    authorization: "",
+    body: expect.objectContaining({
+      qweather: expect.objectContaining({
+        test_location: expect.objectContaining({ latitude: 30.2, longitude: 120.1 })
+      })
+    })
+  });
+  expect(backend.writes[0].body).not.toHaveProperty("location");
+  await page.getByRole("button", { name: "我已保存" }).click();
+  await expect(page.locator("#raw-token")).toHaveText("");
+  await expect(page.locator("#overview-verification")).toContainText("浏览器临时位置");
+  await expect(page.locator("#overview-verification")).not.toContainText("Asia/Shanghai");
+  await expect(page.locator("#overview-verification")).toContainText("28 °C");
+  await expectStableLayout(page);
+  await page.screenshot({ path: testInfo.outputPath("desktop-verification.png"), fullPage: true });
+
+  await page.getByRole("button", { name: "和风天气" }).click();
+  await page.locator('#qweather-form [name="project_id"]').fill("project-next");
+  await page.locator("#qweather-test-browser-location").click();
+  await page.getByRole("button", { name: "测试并保存" }).click();
+  await expect(page.locator("#qweather-message")).toContainText("已保存并生效");
+  await expect(page.locator("#qweather-verification")).toContainText("多云");
+
+  await page.getByRole("button", { name: "设备令牌" }).click();
+  await page.locator('#token-form [name="name"]').fill("轮换设备");
+  await page.getByRole("button", { name: "创建令牌" }).click();
+  await expect(page.locator("#raw-token")).toHaveText("mt_second-device-token");
+  await page.getByRole("button", { name: "我已保存" }).click();
+  await expect(page.locator(".token-item")).toHaveCount(2);
+
+  await expectStableLayout(page);
+  await expectNoBrowserStorage(page);
+  await page.screenshot({ path: testInfo.outputPath("desktop-devices.png"), fullPage: true });
+});
+
+test("@mobile logs in and keeps the settings layout usable", async ({ page }, testInfo) => {
+  const backend = await installBackend(page, true);
+  await page.goto("/admin/");
+  await expect(page.getByRole("heading", { name: "mt-server" })).toBeVisible();
+  await page.locator('#login-form [name="password"]').fill("correct horse battery staple");
+  await page.getByRole("button", { name: "登录" }).click();
+  await expect(page.locator("#dashboard-view")).toBeVisible();
+  expect(backend.writes[0]).toMatchObject({ path: "/session", csrf: backend.publicCSRF });
+
+  await page.getByRole("button", { name: "和风天气" }).click();
+  await expect(page.getByRole("heading", { name: "QWeather" })).toBeVisible();
+  await expect(page.locator('#qweather-form [name="test_latitude"]')).toBeVisible();
+  await expectStableLayout(page);
+  await expectNoBrowserStorage(page);
+  await page.screenshot({ path: testInfo.outputPath("mobile-qweather.png"), fullPage: true });
+});

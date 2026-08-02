@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>mt-server 管理</title>
+  <link rel="stylesheet" href="/admin/assets/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">MT</span>
+      <div><strong>mt-server</strong><small>设备后端管理</small></div>
+    </div>
+    <div class="topbar-actions">
+      <span id="service-status" class="status-pill">正在连接</span>
+      <button id="logout-button" class="quiet hidden" type="button">退出</button>
+    </div>
+  </header>
+
+  <main>
+    <section id="setup-view" class="auth-view hidden">
+      <div class="auth-heading">
+        <p class="eyebrow">首次初始化</p>
+        <h1>连接和风天气</h1>
+        <p>配置会保存在私有状态卷中。设备位置由设备随天气请求提供。</p>
+      </div>
+      <form id="setup-form" class="form-stack">
+        <fieldset>
+          <legend>管理员</legend>
+          <div class="field-grid">
+            <label>管理员密码<input name="password" type="password" minlength="12" maxlength="128" autocomplete="new-password" required></label>
+            <label>确认密码<input name="password_confirm" type="password" minlength="12" maxlength="128" autocomplete="new-password" required></label>
+          </div>
+        </fieldset>
+        <fieldset>
+          <legend>QWeather 凭据</legend>
+          <label>账户专属 API Host<input name="api_host" placeholder="account-id.re.qweatherapi.com" required></label>
+          <div class="field-grid">
+            <label>Project ID<input name="project_id" required></label>
+            <label>Credential ID<input name="credential_id" required></label>
+          </div>
+          <label>Ed25519 私钥文件<input name="private_key_file" type="file" accept=".pem,.key,text/plain"></label>
+          <label>或粘贴 PKCS#8 PEM 私钥<textarea name="private_key_pem" rows="5" spellcheck="false"></textarea></label>
+        </fieldset>
+        <fieldset>
+          <legend>连接测试位置</legend>
+          <p class="field-hint">仅用于本次 QWeather 实时验证，不会保存。</p>
+          <button class="secondary" id="setup-test-browser-location" type="button">使用浏览器临时位置</button>
+          <div class="field-grid coordinate-grid test-location-grid">
+            <label>测试纬度<input name="test_latitude" type="number" min="-90" max="90" step="0.000001" required></label>
+            <label>测试经度<input name="test_longitude" type="number" min="-180" max="180" step="0.000001" required></label>
+          </div>
+          <input name="test_timezone" type="hidden">
+        </fieldset>
+        <label>首个设备名称<input name="device_name" maxlength="64" value="MicroTech" required></label>
+        <div id="setup-message" class="message hidden" role="status"></div>
+        <button class="primary" type="submit">测试并完成初始化</button>
+      </form>
+    </section>
+
+    <section id="login-view" class="auth-view compact hidden">
+      <div class="auth-heading">
+        <p class="eyebrow">管理登录</p>
+        <h1>mt-server</h1>
+      </div>
+      <form id="login-form" class="form-stack">
+        <label>管理员密码<input name="password" type="password" autocomplete="current-password" required></label>
+        <div id="login-message" class="message hidden" role="status"></div>
+        <button class="primary" type="submit">登录</button>
+      </form>
+    </section>
+
+    <section id="dashboard-view" class="dashboard hidden">
+      <nav class="tabs" aria-label="管理页面">
+        <button class="tab active" data-tab="overview" type="button">概览</button>
+        <button class="tab" data-tab="qweather" type="button">和风天气</button>
+        <button class="tab" data-tab="devices" type="button">设备令牌</button>
+        <button class="tab" data-tab="account" type="button">账户</button>
+      </nav>
+
+      <div class="workspace">
+        <section class="panel active" data-panel="overview">
+          <div class="section-heading"><p class="eyebrow">运行状态</p><h2>服务概览</h2></div>
+          <dl class="status-grid">
+            <div><dt>天气服务</dt><dd id="overview-ready">-</dd></div>
+            <div><dt>版本</dt><dd id="overview-version">-</dd></div>
+            <div><dt>管理连接</dt><dd id="overview-transport">-</dd></div>
+            <div><dt>数据来源</dt><dd>和风天气 / QWeather</dd></div>
+          </dl>
+          <div id="overview-verification" class="verification hidden"></div>
+        </section>
+
+        <section class="panel" data-panel="qweather">
+          <div class="section-heading"><p class="eyebrow">天气供应商</p><h2>QWeather</h2></div>
+          <form id="qweather-form" class="form-stack settings-form">
+            <label>账户专属 API Host<input name="api_host" required></label>
+            <div class="field-grid">
+              <label>Project ID<input name="project_id" required></label>
+              <label>Credential ID<input name="credential_id" required></label>
+            </div>
+            <div class="readonly-row"><span>私钥状态</span><strong id="key-state">-</strong></div>
+            <div class="readonly-row"><span>公钥指纹</span><code id="key-fingerprint">-</code></div>
+            <label>替换私钥文件<input name="private_key_file" type="file" accept=".pem,.key,text/plain"></label>
+            <label>或粘贴新私钥<textarea name="private_key_pem" rows="5" spellcheck="false"></textarea></label>
+            <div class="test-location-actions">
+              <span>本次连接验证</span>
+              <button class="secondary" id="qweather-test-browser-location" type="button">使用浏览器临时位置</button>
+            </div>
+            <div class="field-grid coordinate-grid test-location-grid">
+              <label>测试纬度<input name="test_latitude" type="number" min="-90" max="90" step="0.000001" required></label>
+              <label>测试经度<input name="test_longitude" type="number" min="-180" max="180" step="0.000001" required></label>
+            </div>
+            <input name="test_timezone" type="hidden">
+            <div id="qweather-message" class="message hidden" role="status"></div>
+            <div id="qweather-verification" class="verification hidden"></div>
+            <div class="button-row">
+              <button class="secondary" id="qweather-test" type="button">测试连接</button>
+              <button class="primary" type="submit">测试并保存</button>
+            </div>
+          </form>
+        </section>
+
+        <section class="panel" data-panel="devices">
+          <div class="section-heading"><p class="eyebrow">设备访问</p><h2>API 令牌</h2></div>
+          <form id="token-form" class="inline-form">
+            <label>设备名称<input name="name" maxlength="64" required></label>
+            <button class="primary" type="submit">创建令牌</button>
+          </form>
+          <div id="token-message" class="message hidden" role="status"></div>
+          <div id="token-list" class="token-list"></div>
+        </section>
+
+        <section class="panel" data-panel="account">
+          <div class="section-heading"><p class="eyebrow">管理员</p><h2>修改密码</h2></div>
+          <form id="password-form" class="form-stack settings-form">
+            <label>当前密码<input name="current_password" type="password" autocomplete="current-password" required></label>
+            <label>新密码<input name="new_password" type="password" minlength="12" maxlength="128" autocomplete="new-password" required></label>
+            <label>确认新密码<input name="new_password_confirm" type="password" minlength="12" maxlength="128" autocomplete="new-password" required></label>
+            <div id="password-message" class="message hidden" role="status"></div>
+            <button class="primary" type="submit">更新密码</button>
+          </form>
+        </section>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="token-dialog">
+    <div class="dialog-heading"><p class="eyebrow">仅显示一次</p><h2>设备 API 令牌</h2></div>
+    <code id="raw-token"></code>
+    <div class="button-row">
+      <button id="copy-token" class="secondary" type="button">复制</button>
+      <button id="close-token" class="primary" type="button">我已保存</button>
+    </div>
+  </dialog>
+  <script type="module" src="/admin/assets/app.js"></script>
+</body>
+</html>

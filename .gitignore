@@ -1,0 +1,27 @@
+# Local deployment state and secrets
+.env
+.env.*
+!.env.example
+secrets/
+deploy/private/
+state.json
+bootstrap.json
+*.pem
+*.key
+*.crt
+*.credentials.json
+
+# Frontend test output
+/node_modules/
+/playwright-report/
+/test-results/
+
+# Build and editor output
+/bin/
+/dist/
+/coverage.out
+/.idea/
+/.vscode/
+*.swp
+*.tmp
+.DS_Store

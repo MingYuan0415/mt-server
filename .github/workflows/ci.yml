@@ -1,0 +1,131 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 1.26.5
+          cache: true
+      - name: Check formatting
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test -coverprofile=coverage.out ./...
+      - name: Race test
+        run: go test -race ./...
+      - name: Vulnerability scan
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+          govulncheck ./...
+      - name: Build
+        run: CGO_ENABLED=0 go build -trimpath ./cmd/mt-server
+      - name: Lint workflows
+        run: |
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+          actionlint
+
+  web:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 1.26.5
+          cache: true
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install frontend test dependencies
+        run: npm ci
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+      - name: Test management interface
+        run: npm run test:web
+      - name: Upload Playwright report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 14
+
+  container:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - name: Build image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          load: true
+          tags: mt-server:ci
+          build-args: VERSION=ci
+      - name: Scan image
+        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+        with:
+          image: mt-server:ci
+          fail-build: true
+          severity-cutoff: high
+      - name: Smoke test image
+        run: |
+          volume="mt-server-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          cleanup() {
+            docker rm -f mt-server-smoke >/dev/null 2>&1 || true
+            docker volume rm "$volume" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          docker volume create "$volume"
+          docker run -d --name mt-server-smoke \
+            --read-only \
+            --user 65532:65532 \
+            --cap-drop ALL \
+            --security-opt no-new-privileges:true \
+            -p 127.0.0.1:18080:8080 \
+            -e MT_ADMIN_ALLOW_INSECURE_HTTP=true \
+            --mount "type=volume,source=$volume,target=/var/lib/mt-server" \
+            mt-server:ci
+          for attempt in $(seq 1 20); do
+            if curl --fail --silent http://127.0.0.1:18080/health/live >/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          curl --fail --silent http://127.0.0.1:18080/health/live >/dev/null
+          test "$(curl --silent --output ready.json --write-out '%{http_code}' \
+            http://127.0.0.1:18080/health/ready)" = "503"
+          grep -q setup_required ready.json
+          curl --fail --silent http://127.0.0.1:18080/admin/ | grep -q mt-server
+          test "$(curl --silent --output device.json --write-out '%{http_code}' \
+            http://127.0.0.1:18080/api/v1/weather/current)" = "503"
+          grep -q service_unconfigured device.json
+          test "$(docker inspect --format '{{.Config.User}}' mt-server-smoke)" = "65532:65532"
+          test "$(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' mt-server-smoke)" = "true"
+          ! docker exec mt-server-smoke /mt-server setup-token
+          status="$(curl --fail --silent http://127.0.0.1:18080/admin/api/v1/status)"
+          csrf="$(printf '%s' "$status" | sed -n 's/.*"csrf_token":"\([^"]*\)".*/\1/p')"
+          test -n "$csrf"
+          test "$(curl --silent --output setup.json --write-out '%{http_code}' \
+            -H 'Content-Type: application/json' \
+            -H 'Origin: http://127.0.0.1:18080' \
+            -H "X-CSRF-Token: $csrf" \
+            --data '{}' \
+            http://127.0.0.1:18080/admin/api/v1/setup)" = "400"
+          grep -q invalid_password setup.json
+      - name: Validate Compose templates
+        run: |
+          docker compose -f deploy/compose.lan.yaml config --quiet
+          MT_PUBLIC_HOST=api.example.com docker compose -f deploy/compose.https.yaml config --quiet

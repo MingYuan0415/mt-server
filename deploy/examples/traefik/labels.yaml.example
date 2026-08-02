@@ -1,0 +1,6 @@
+labels:
+  - traefik.enable=true
+  - traefik.http.routers.mt-server.rule=Host(`api.example.com`)
+  - traefik.http.routers.mt-server.entrypoints=websecure
+  - traefik.http.routers.mt-server.tls=true
+  - traefik.http.services.mt-server.loadbalancer.server.port=8080

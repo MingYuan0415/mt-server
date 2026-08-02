@@ -1,0 +1,7 @@
+tunnel: 00000000-0000-0000-0000-000000000000
+credentials-file: /run/secrets/cloudflared_credentials.json
+
+ingress:
+  - hostname: api.example.com
+    service: http://mt-server:8080
+  - service: http_status:404

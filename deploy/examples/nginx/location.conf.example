@@ -1,0 +1,4 @@
+location / {
+    proxy_pass http://mt-server:8080;
+    proxy_set_header Host $host;
+}

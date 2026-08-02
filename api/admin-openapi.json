@@ -1,0 +1,183 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "mt-server management API",
+    "version": "1.0.0",
+    "description": "Same-origin API used by the embedded management interface. Secret values are never returned after creation."
+  },
+  "servers": [{ "url": "https://api.example.com/admin/api/v1" }],
+  "paths": {
+    "/status": {
+      "get": {
+        "security": [],
+        "responses": { "200": { "description": "Setup and runtime status, including the restart-local pre-authentication CSRF token" } }
+      }
+    },
+    "/setup": {
+      "post": {
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SetupRequest" } } }
+        },
+        "responses": {
+          "201": {
+            "description": "Initialized; includes the first raw device token exactly once",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SetupResponse" } } }
+          },
+          "400": { "$ref": "#/components/responses/Error" },
+          "409": { "$ref": "#/components/responses/Error" },
+          "422": { "$ref": "#/components/responses/Error" },
+          "429": { "$ref": "#/components/responses/Error" },
+          "502": { "$ref": "#/components/responses/Error" },
+          "504": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/session": {
+      "get": {
+        "responses": { "200": { "description": "Current CSRF token" }, "401": { "$ref": "#/components/responses/Error" } }
+      },
+      "post": {
+        "security": [],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/LoginRequest" } } } },
+        "responses": { "200": { "description": "Administrator session created" }, "401": { "$ref": "#/components/responses/Error" } }
+      },
+      "delete": {
+        "responses": { "200": { "description": "Administrator session deleted" } }
+      }
+    },
+    "/settings/qweather": {
+      "get": { "responses": { "200": { "description": "Masked QWeather settings" } } },
+      "put": {
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/QWeatherInput" } } } },
+        "responses": {
+          "200": { "description": "Tested, persisted, activated, and returned current weather verification", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/VerificationResponse" } } } },
+          "400": { "$ref": "#/components/responses/Error" }, "422": { "$ref": "#/components/responses/Error" },
+          "429": { "$ref": "#/components/responses/Error" }, "502": { "$ref": "#/components/responses/Error" },
+          "504": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/settings/qweather/test": {
+      "post": {
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/QWeatherInput" } } } },
+        "responses": {
+          "200": { "description": "Connection test passed and returned current weather without persistence", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/VerificationResponse" } } } },
+          "400": { "$ref": "#/components/responses/Error" }, "422": { "$ref": "#/components/responses/Error" },
+          "429": { "$ref": "#/components/responses/Error" }, "502": { "$ref": "#/components/responses/Error" },
+          "504": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/device-tokens": {
+      "get": { "responses": { "200": { "description": "Named token metadata without hashes or raw values" } } },
+      "post": {
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["name"], "properties": { "name": { "type": "string", "minLength": 1, "maxLength": 64 } } } } } },
+        "responses": { "201": { "description": "Raw token returned exactly once" }, "409": { "$ref": "#/components/responses/Error" } }
+      }
+    },
+    "/device-tokens/{id}": {
+      "delete": {
+        "parameters": [{ "in": "path", "name": "id", "required": true, "schema": { "type": "string" } }],
+        "responses": { "204": { "description": "Token revoked" }, "404": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" } }
+      }
+    },
+    "/account/password": {
+      "put": {
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["current_password", "new_password"], "properties": { "current_password": { "type": "string" }, "new_password": { "type": "string", "minLength": 12, "maxLength": 128 } } } } } },
+        "responses": { "200": { "description": "Password updated and all sessions invalidated" }, "401": { "$ref": "#/components/responses/Error" } }
+      }
+    }
+  },
+  "security": [{ "adminSession": [] }],
+  "components": {
+    "securitySchemes": {
+      "adminSession": { "type": "apiKey", "in": "cookie", "name": "mt_admin_session" }
+    },
+    "responses": {
+      "Error": { "description": "Stable JSON error", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } }
+    },
+    "schemas": {
+      "QWeatherInput": {
+        "type": "object",
+        "required": ["api_host", "project_id", "credential_id", "test_location"],
+        "properties": {
+          "api_host": { "type": "string" },
+          "project_id": { "type": "string" },
+          "credential_id": { "type": "string" },
+          "private_key_pem": { "type": "string", "description": "Required during setup; omission retains the existing key during updates." },
+          "test_location": { "$ref": "#/components/schemas/TestLocation" }
+        }
+      },
+      "TestLocation": {
+        "type": "object",
+        "description": "Ephemeral browser location used only for this verification request and never persisted.",
+        "required": ["latitude", "longitude"],
+        "properties": {
+          "latitude": { "type": "number", "minimum": -90, "maximum": 90 },
+          "longitude": { "type": "number", "minimum": -180, "maximum": 180 },
+		  "city": { "type": "string", "maxLength": 128 },
+		  "region": { "type": "string", "maxLength": 128 },
+		  "country": { "type": "string", "maxLength": 128 },
+          "timezone": { "type": "string", "maxLength": 128 }
+        }
+      },
+      "SetupRequest": {
+		"type": "object",
+		"required": ["password", "qweather", "device_name"],
+        "properties": {
+          "password": { "type": "string", "minLength": 12, "maxLength": 128 },
+		  "qweather": { "$ref": "#/components/schemas/QWeatherInput" },
+          "device_name": { "type": "string", "minLength": 1, "maxLength": 64 }
+        }
+      },
+      "Verification": {
+        "type": "object",
+        "required": ["source", "location", "tested_at", "updated_at", "data"],
+        "properties": {
+          "source": { "type": "object", "required": ["id", "name", "attribution_url"] },
+          "location": {
+            "type": "object",
+			"required": ["source", "provider", "precision"],
+            "properties": {
+              "city": { "type": "string" }, "region": { "type": "string" },
+              "country": { "type": "string" }, "timezone": { "type": "string" },
+			  "source": { "type": "string", "const": "browser" },
+			  "provider": { "type": "string", "const": "browser" },
+			  "precision": { "type": "string", "const": "coarse" }
+            }
+          },
+          "tested_at": { "type": "string", "format": "date-time" },
+          "updated_at": { "type": "string", "format": "date-time" },
+          "data": { "type": "object", "description": "Normalized metric current-weather fields" }
+        }
+      },
+      "VerificationResponse": {
+        "type": "object",
+        "required": ["status", "verification"],
+        "properties": {
+          "status": { "type": "string", "enum": ["ok", "saved"] },
+          "public_key_fingerprint": { "type": "string" },
+          "verification": { "$ref": "#/components/schemas/Verification" }
+        }
+      },
+      "SetupResponse": {
+        "type": "object",
+        "required": ["csrf_token", "device_token", "device", "qweather_public_key_fingerprint", "verification"],
+        "properties": {
+          "csrf_token": { "type": "string" },
+          "device_token": { "type": "string" },
+          "device": { "type": "object" },
+          "qweather_public_key_fingerprint": { "type": "string" },
+          "verification": { "$ref": "#/components/schemas/Verification" }
+        }
+      },
+      "LoginRequest": { "type": "object", "required": ["password"], "properties": { "password": { "type": "string" } } },
+      "ErrorResponse": {
+        "type": "object", "required": ["error"],
+        "properties": { "error": { "type": "object", "required": ["code", "message"], "properties": { "code": { "type": "string" }, "message": { "type": "string" }, "request_id": { "type": "string" } } } }
+      }
+    }
+  }
+}

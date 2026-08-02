@@ -1,0 +1,486 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "mt-server device API",
+    "version": "1.0.0",
+    "description": "Versioned device backend API. Weather data is provided by QWeather."
+  },
+  "servers": [
+    { "url": "https://api.example.com" }
+  ],
+  "paths": {
+    "/api/v1/weather/current": {
+      "get": {
+        "operationId": "getCurrentWeather",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/LocationLatitude" },
+          { "$ref": "#/components/parameters/LocationLongitude" },
+          { "$ref": "#/components/parameters/LocationProvider" },
+          { "$ref": "#/components/parameters/LocationCity" },
+          { "$ref": "#/components/parameters/LocationRegion" },
+          { "$ref": "#/components/parameters/LocationCountry" },
+          { "$ref": "#/components/parameters/LocationTimezone" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current weather",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/WeatherEnvelope" },
+                    { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/CurrentWeather" } } }
+                  ]
+                },
+                "examples": { "default": { "$ref": "#/components/examples/CurrentWeatherResponse" } }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/InvalidLocation" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "429": { "$ref": "#/components/responses/LocationRateLimited" },
+          "504": { "$ref": "#/components/responses/GatewayTimeout" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/weather/hourly": {
+      "get": {
+        "operationId": "getHourlyWeather",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/LocationLatitude" },
+          { "$ref": "#/components/parameters/LocationLongitude" },
+          { "$ref": "#/components/parameters/LocationProvider" },
+          { "$ref": "#/components/parameters/LocationCity" },
+          { "$ref": "#/components/parameters/LocationRegion" },
+          { "$ref": "#/components/parameters/LocationCountry" },
+          { "$ref": "#/components/parameters/LocationTimezone" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Up to 24 hourly forecasts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/WeatherEnvelope" },
+                    { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/HourlyWeather" } } }
+                  ]
+                },
+                "examples": { "default": { "$ref": "#/components/examples/HourlyWeatherResponse" } }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/InvalidLocation" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "429": { "$ref": "#/components/responses/LocationRateLimited" },
+          "504": { "$ref": "#/components/responses/GatewayTimeout" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/weather/daily": {
+      "get": {
+        "operationId": "getDailyWeather",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/LocationLatitude" },
+          { "$ref": "#/components/parameters/LocationLongitude" },
+          { "$ref": "#/components/parameters/LocationProvider" },
+          { "$ref": "#/components/parameters/LocationCity" },
+          { "$ref": "#/components/parameters/LocationRegion" },
+          { "$ref": "#/components/parameters/LocationCountry" },
+          { "$ref": "#/components/parameters/LocationTimezone" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Up to seven daily forecasts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/WeatherEnvelope" },
+                    { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/DailyWeather" } } }
+                  ]
+                },
+                "examples": { "default": { "$ref": "#/components/examples/DailyWeatherResponse" } }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/InvalidLocation" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "429": { "$ref": "#/components/responses/LocationRateLimited" },
+          "504": { "$ref": "#/components/responses/GatewayTimeout" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/health/live": {
+      "get": {
+        "operationId": "getLiveness",
+        "security": [],
+        "responses": {
+          "200": { "description": "Process is alive" }
+        }
+      }
+    },
+    "/health/ready": {
+      "get": {
+        "operationId": "getReadiness",
+        "security": [],
+        "responses": {
+          "200": { "description": "All modules are ready" },
+          "503": { "description": "Setup is required or a module circuit is open" }
+        }
+      }
+    }
+  },
+  "components": {
+    "parameters": {
+      "LocationLatitude": {
+        "name": "X-MT-Location-Latitude", "in": "header", "required": true,
+        "description": "Device-obtained decimal latitude; normalized by the server to a 0.1 degree grid.",
+        "schema": { "type": "string", "maxLength": 32 }
+      },
+      "LocationLongitude": {
+        "name": "X-MT-Location-Longitude", "in": "header", "required": true,
+        "description": "Device-obtained decimal longitude; normalized by the server to a 0.1 degree grid.",
+        "schema": { "type": "string", "maxLength": 32 }
+      },
+      "LocationProvider": {
+        "name": "X-MT-Location-Provider", "in": "header", "required": true,
+        "description": "Lowercase identifier for the device-side location provider.",
+        "schema": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,31}$" }
+      },
+      "LocationCity": {
+        "name": "X-MT-Location-City", "in": "header", "required": false,
+        "schema": { "type": "string", "maxLength": 128 }
+      },
+      "LocationRegion": {
+        "name": "X-MT-Location-Region", "in": "header", "required": false,
+        "schema": { "type": "string", "maxLength": 128 }
+      },
+      "LocationCountry": {
+        "name": "X-MT-Location-Country", "in": "header", "required": false,
+        "schema": { "type": "string", "maxLength": 128 }
+      },
+      "LocationTimezone": {
+        "name": "X-MT-Location-Timezone", "in": "header", "required": false,
+        "schema": { "type": "string", "maxLength": 128 }
+      }
+    },
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    },
+    "responses": {
+      "InvalidLocation": {
+        "description": "Required device location headers are missing or invalid",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+      },
+      "LocationRateLimited": {
+        "description": "The authenticated device changed location grids too frequently",
+        "headers": { "Retry-After": { "schema": { "type": "integer", "minimum": 1 } } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+      },
+      "Unauthorized": {
+        "description": "Missing or invalid device token",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+      },
+      "Unavailable": {
+        "description": "Location or weather data is unavailable",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+      },
+      "GatewayTimeout": {
+        "description": "The weather provider timed out",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+      }
+    },
+    "examples": {
+      "CurrentWeatherResponse": {
+        "summary": "Current weather for a device-supplied coarse location",
+        "value": {
+          "schema_version": 1,
+          "source": {
+            "id": "qweather",
+            "name": "QWeather",
+            "attribution_url": "https://www.qweather.com/"
+          },
+          "location": {
+            "city": "Example City",
+            "region": "Example Region",
+            "country": "EX",
+            "timezone": "Etc/UTC",
+            "source": "device",
+            "provider": "ipinfo",
+            "precision": "city"
+          },
+          "fetched_at": "2026-08-02T02:00:00Z",
+          "updated_at": "2026-08-02T01:55:00Z",
+          "valid_until": "2026-08-02T02:20:00Z",
+          "stale": false,
+          "data": {
+            "observed_at": "2026-08-02T01:50:00Z",
+            "temperature_c": 28,
+            "feels_like_c": 31,
+            "condition_code": "101",
+            "condition_text": "Cloudy",
+            "wind_degrees": 135,
+            "wind_direction": "Southeast",
+            "wind_scale": "2",
+            "wind_speed_kmh": 8,
+            "humidity_percent": 72,
+            "precipitation_mm": 0,
+            "pressure_hpa": 1004,
+            "visibility_km": 16,
+            "cloud_percent": 80,
+            "dew_point_c": 22
+          }
+        }
+      },
+      "HourlyWeatherResponse": {
+        "summary": "Hourly weather forecast",
+        "value": {
+          "schema_version": 1,
+          "source": {
+            "id": "qweather",
+            "name": "QWeather",
+            "attribution_url": "https://www.qweather.com/"
+          },
+          "location": {
+            "city": "Example City",
+            "country": "EX",
+            "source": "device",
+            "provider": "ipinfo",
+            "precision": "city"
+          },
+          "fetched_at": "2026-08-02T02:00:00Z",
+          "updated_at": "2026-08-02T01:55:00Z",
+          "valid_until": "2026-08-02T03:00:00Z",
+          "stale": false,
+          "data": {
+            "hours": [
+              {
+                "forecast_at": "2026-08-02T03:00:00Z",
+                "temperature_c": 29,
+                "condition_code": "101",
+                "condition_text": "Cloudy",
+                "wind_degrees": 140,
+                "wind_direction": "Southeast",
+                "wind_scale": "2",
+                "wind_speed_kmh": 9,
+                "humidity_percent": 70,
+                "precipitation_chance_percent": 20,
+                "precipitation_mm": 0,
+                "pressure_hpa": 1003
+              }
+            ]
+          }
+        }
+      },
+      "DailyWeatherResponse": {
+        "summary": "Daily weather forecast",
+        "value": {
+          "schema_version": 1,
+          "source": {
+            "id": "qweather",
+            "name": "QWeather",
+            "attribution_url": "https://www.qweather.com/"
+          },
+          "location": {
+            "city": "Example City",
+            "country": "EX",
+            "source": "device",
+            "provider": "ipinfo",
+            "precision": "city"
+          },
+          "fetched_at": "2026-08-02T02:00:00Z",
+          "updated_at": "2026-08-02T01:55:00Z",
+          "valid_until": "2026-08-02T06:00:00Z",
+          "stale": false,
+          "data": {
+            "days": [
+              {
+                "date": "2026-08-02",
+                "temperature_max_c": 32,
+                "temperature_min_c": 25,
+                "condition_day_code": "101",
+                "condition_day_text": "Cloudy",
+                "condition_night_code": "150",
+                "condition_night_text": "Clear",
+                "wind_day_degrees": 135,
+                "wind_day_direction": "Southeast",
+                "wind_day_scale": "2",
+                "wind_day_speed_kmh": 9,
+                "wind_night_degrees": 90,
+                "wind_night_direction": "East",
+                "wind_night_scale": "2",
+                "wind_night_speed_kmh": 7,
+                "humidity_percent": 74,
+                "precipitation_mm": 0,
+                "pressure_hpa": 1004,
+                "visibility_km": 18,
+                "uv_index": 6
+              }
+            ]
+          }
+        }
+      }
+    },
+    "schemas": {
+      "WeatherEnvelope": {
+        "type": "object",
+        "required": ["schema_version", "source", "location", "fetched_at", "updated_at", "valid_until", "stale", "data"],
+        "properties": {
+          "schema_version": { "type": "integer", "const": 1 },
+          "source": { "$ref": "#/components/schemas/Source" },
+          "location": { "$ref": "#/components/schemas/Location" },
+          "fetched_at": { "type": "string", "format": "date-time" },
+          "updated_at": { "type": "string", "format": "date-time" },
+          "valid_until": { "type": "string", "format": "date-time" },
+          "stale": { "type": "boolean" },
+          "data": {}
+        }
+      },
+      "Source": {
+        "type": "object",
+        "required": ["id", "name", "attribution_url"],
+        "properties": {
+          "id": { "type": "string", "const": "qweather" },
+          "name": { "type": "string", "const": "QWeather" },
+          "attribution_url": { "type": "string", "format": "uri" }
+        }
+      },
+      "Location": {
+        "type": "object",
+        "required": ["source", "provider", "precision"],
+        "properties": {
+          "city": { "type": "string" },
+          "region": { "type": "string" },
+          "country": { "type": "string" },
+          "timezone": { "type": "string" },
+          "source": { "type": "string", "const": "device" },
+          "provider": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,31}$" },
+          "precision": { "type": "string", "const": "city" }
+        }
+      },
+      "CurrentWeather": {
+        "type": "object",
+        "required": ["observed_at", "temperature_c", "feels_like_c", "condition_code", "condition_text", "wind_degrees", "wind_direction", "wind_scale", "wind_speed_kmh", "humidity_percent", "precipitation_mm", "pressure_hpa", "visibility_km"],
+        "properties": {
+          "observed_at": { "type": "string", "format": "date-time" },
+          "temperature_c": { "type": "number" },
+          "feels_like_c": { "type": "number" },
+          "condition_code": { "type": "string" },
+          "condition_text": { "type": "string" },
+          "wind_degrees": { "type": "number" },
+          "wind_direction": { "type": "string" },
+          "wind_scale": { "type": "string" },
+          "wind_speed_kmh": { "type": "number" },
+          "humidity_percent": { "type": "number" },
+          "precipitation_mm": { "type": "number" },
+          "pressure_hpa": { "type": "number" },
+          "visibility_km": { "type": "number" },
+          "cloud_percent": { "type": "number" },
+          "dew_point_c": { "type": "number" }
+        }
+      },
+      "HourlyWeather": {
+        "type": "object",
+        "required": ["hours"],
+        "properties": {
+          "hours": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 24,
+            "items": { "$ref": "#/components/schemas/HourlyItem" }
+          }
+        }
+      },
+      "HourlyItem": {
+        "type": "object",
+        "required": ["forecast_at", "temperature_c", "condition_code", "condition_text", "wind_degrees", "wind_direction", "wind_scale", "wind_speed_kmh", "humidity_percent", "precipitation_chance_percent", "precipitation_mm", "pressure_hpa"],
+        "properties": {
+          "forecast_at": { "type": "string", "format": "date-time" },
+          "temperature_c": { "type": "number" },
+          "condition_code": { "type": "string" },
+          "condition_text": { "type": "string" },
+          "wind_degrees": { "type": "number" },
+          "wind_direction": { "type": "string" },
+          "wind_scale": { "type": "string" },
+          "wind_speed_kmh": { "type": "number" },
+          "humidity_percent": { "type": "number" },
+          "precipitation_chance_percent": { "type": "number" },
+          "precipitation_mm": { "type": "number" },
+          "pressure_hpa": { "type": "number" },
+          "cloud_percent": { "type": "number" },
+          "dew_point_c": { "type": "number" }
+        }
+      },
+      "DailyWeather": {
+        "type": "object",
+        "required": ["days"],
+        "properties": {
+          "days": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 7,
+            "items": { "$ref": "#/components/schemas/DailyItem" }
+          }
+        }
+      },
+      "DailyItem": {
+        "type": "object",
+        "required": ["date", "temperature_max_c", "temperature_min_c", "condition_day_code", "condition_day_text", "condition_night_code", "condition_night_text", "wind_day_degrees", "wind_day_direction", "wind_day_scale", "wind_day_speed_kmh", "wind_night_degrees", "wind_night_direction", "wind_night_scale", "wind_night_speed_kmh", "humidity_percent", "precipitation_mm", "pressure_hpa", "visibility_km", "uv_index"],
+        "properties": {
+          "date": { "type": "string", "format": "date" },
+          "sunrise": { "type": "string", "format": "date-time" },
+          "sunset": { "type": "string", "format": "date-time" },
+          "moonrise": { "type": "string", "format": "date-time" },
+          "moonset": { "type": "string", "format": "date-time" },
+          "moon_phase": { "type": "string" },
+          "moon_phase_code": { "type": "string" },
+          "temperature_max_c": { "type": "number" },
+          "temperature_min_c": { "type": "number" },
+          "condition_day_code": { "type": "string" },
+          "condition_day_text": { "type": "string" },
+          "condition_night_code": { "type": "string" },
+          "condition_night_text": { "type": "string" },
+          "wind_day_degrees": { "type": "number" },
+          "wind_day_direction": { "type": "string" },
+          "wind_day_scale": { "type": "string" },
+          "wind_day_speed_kmh": { "type": "number" },
+          "wind_night_degrees": { "type": "number" },
+          "wind_night_direction": { "type": "string" },
+          "wind_night_scale": { "type": "string" },
+          "wind_night_speed_kmh": { "type": "number" },
+          "humidity_percent": { "type": "number" },
+          "precipitation_mm": { "type": "number" },
+          "pressure_hpa": { "type": "number" },
+          "visibility_km": { "type": "number" },
+          "cloud_percent": { "type": "number" },
+          "uv_index": { "type": "number" }
+        }
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "required": ["error"],
+        "properties": {
+          "error": {
+            "type": "object",
+            "required": ["code", "message"],
+            "properties": {
+              "code": { "type": "string" },
+              "message": { "type": "string" },
+              "request_id": { "type": "string" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

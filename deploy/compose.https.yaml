@@ -1,0 +1,78 @@
+name: mt-server-https
+
+services:
+  mt-server:
+    image: ${MT_SERVER_IMAGE:-ghcr.io/mingyuan0415/mt-server:v0.1.0}
+    restart: unless-stopped
+    read_only: true
+    user: "65532:65532"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 256m
+    cpus: 1.0
+    tmpfs:
+      - /tmp:size=1m,mode=1777
+    expose:
+      - "8080"
+    environment:
+      MT_LISTEN_ADDR: ":8080"
+      MT_LOG_LEVEL: ${MT_LOG_LEVEL:-info}
+      MT_STATE_DIR: /var/lib/mt-server
+      MT_ADMIN_ALLOW_INSECURE_HTTP: "false"
+      MT_ADMIN_BEHIND_HTTPS_PROXY: "true"
+    volumes:
+      - mt-server-state:/var/lib/mt-server
+    networks:
+      - backend
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  caddy:
+    image: caddy:2.10.2-alpine
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 256m
+    cpus: 1.0
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      MT_PUBLIC_HOST: ${MT_PUBLIC_HOST:?set MT_PUBLIC_HOST to the public hostname}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    tmpfs:
+      - /tmp:size=4m,mode=1777
+    depends_on:
+      mt-server:
+        condition: service_healthy
+    networks:
+      - backend
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  mt-server-state:
+  caddy-data:
+  caddy-config:
+
+networks:
+  backend:
