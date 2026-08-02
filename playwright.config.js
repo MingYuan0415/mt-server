@@ -12,11 +12,12 @@ module.exports = defineConfig({
   outputDir: "test-results",
   reporter: process.env.CI ? [["line"], ["html", { open: "never" }]] : "list",
   use: {
-    baseURL: "http://127.0.0.1:18080",
+    baseURL: "https://admin.example.test:18443",
+    ignoreHTTPSErrors: true,
     locale: "zh-CN",
     launchOptions: { args: [
       "--no-proxy-server",
-      "--host-resolver-rules=MAP insecure.example.test 127.0.0.1"
+      "--host-resolver-rules=MAP admin.example.test 127.0.0.1,MAP new.example.test 127.0.0.1,MAP insecure.example.test 127.0.0.1"
     ] },
     trace: "retain-on-failure"
   },

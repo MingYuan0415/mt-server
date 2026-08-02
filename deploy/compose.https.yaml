@@ -2,7 +2,7 @@ name: mt-server-https
 
 services:
   mt-server:
-    image: ${MT_SERVER_IMAGE:-ghcr.io/mingyuan0415/mt-server:v0.1.1}
+    image: ${MT_SERVER_IMAGE:-ghcr.io/mingyuan0415/mt-server:v0.2.0}
     restart: unless-stopped
     read_only: true
     user: "65532:65532"
@@ -23,7 +23,6 @@ services:
       MT_STATE_DIR: /var/lib/mt-server
       MT_ADMIN_ALLOW_INSECURE_HTTP: "false"
       MT_ADMIN_BEHIND_HTTPS_PROXY: "true"
-      MT_ADMIN_PUBLIC_ORIGINS: https://${MT_PUBLIC_HOST}
     volumes:
       - mt-server-state:/var/lib/mt-server
     networks:

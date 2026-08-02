@@ -21,7 +21,7 @@ cmd/mt-server
 
 状态替换分为明确的提交边界：临时文件写入、文件同步或 rename 前失败均不改变活动状态；rename 后目录同步失败视为逻辑提交成功，但管理响应带 `X-MT-State-Warning: durability_unconfirmed`，状态接口同时报告 `state_durability: unconfirmed`。下一次完整同步成功后告警清除。
 
-schema v2 状态包含 Argon2id 管理员验证器、QWeather 私钥、缓存设置和设备令牌哈希，不包含定位配置或设备位置。未知 schema 或损坏状态会使启动失败，不会静默回到初始化状态。
+schema v3 状态包含 Argon2id 管理员验证器、管理 HTTPS Origin、QWeather 私钥、缓存设置和设备令牌哈希，不包含定位配置或设备位置。schema v2 不自动迁移；未知 schema 或损坏状态会使启动失败，不会静默回到初始化状态。
 
 ## 天气请求流程
 
@@ -57,7 +57,9 @@ QWeather 更新会创建新运行时并清空旧缓存；失败时保留原状�
 
 管理员密码使用 Argon2id，要求至少 12 个 Unicode code point 且不超过 128 个 UTF-8 字节。管理 session 和 CSRF token 仅存在内存，重启后失效。所有写操作要求同源 Origin 和 CSRF；初始化与登录使用不记录 IP 的全局限速。Cookie 使用 `HttpOnly`、`SameSite=Strict`，直接 TLS 或显式配置 `MT_ADMIN_BEHIND_HTTPS_PROXY=true` 时增加 `Secure`。
 
-代理部署通过 `MT_ADMIN_PUBLIC_ORIGINS` 显式列出浏览器可见的 HTTPS Origin，同源校验不依赖代理内部 `Host`。服务不信任 `Forwarded` 或任何 `X-Forwarded-*` 头。LAN 模板显式允许管理 HTTP；HTTPS 源站不得暴露到不受信网络。
+代理部署把浏览器可见的 HTTPS Origin 持久化到状态卷，同源校验不依赖代理内部 `Host`。初始化候选列表必须包含当前标准 `Origin`；管理写入在状态提交后原子替换活动白名单。添加入口保留会话，删除入口清除全部会话，且当前入口不可删除。服务不信任 `Forwarded` 或任何 `X-Forwarded-*` 头。LAN 模板显式允许管理 HTTP；HTTPS 源站不得暴露到不受信网络。
+
+服务进程在整个生命周期持有状态目录独占锁。离线管理域名命令使用同一把锁，运行中的服务不会与维护命令并发覆盖 `state.json`。
 
 ## 扩展规则
 

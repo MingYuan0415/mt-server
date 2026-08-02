@@ -25,6 +25,9 @@ func TestNewStartsUnconfiguredManagementPlane(t *testing.T) {
 		if err := application.closeModules(application.modules); err != nil {
 			t.Error(err)
 		}
+		if err := application.lock.Close(); err != nil {
+			t.Error(err)
+		}
 	}()
 
 	for _, test := range []struct {
@@ -72,6 +75,9 @@ func TestNewRestoresConfiguredRuntimeWithoutCallingUpstream(t *testing.T) {
 		if err := application.closeModules(application.modules); err != nil {
 			t.Error(err)
 		}
+		if err := application.lock.Close(); err != nil {
+			t.Error(err)
+		}
 	}()
 
 	ready := httptest.NewRecorder()
@@ -86,4 +92,33 @@ func TestNewRestoresConfiguredRuntimeWithoutCallingUpstream(t *testing.T) {
 	if device.Code != http.StatusUnauthorized {
 		t.Fatalf("restored device API returned %d %s", device.Code, device.Body.String())
 	}
+}
+
+func TestNewRequiresPersistentOriginInProxyMode(t *testing.T) {
+	directory := t.TempDir()
+	store, err := state.NewStore(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value := validRuntimeState(t)
+	if _, err := store.CommitInitial(value); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Config{
+		ListenAddr: ":0", LogLevel: "info", StateDir: directory,
+		AdminBehindHTTPSProxy: true,
+	}
+	if _, err := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), "test"); err == nil ||
+		!strings.Contains(err.Error(), "at least one HTTPS origin") {
+		t.Fatalf("proxy mode accepted an empty persisted origin list: %v", err)
+	}
+	value.Admin.PublicOrigins = []string{"https://admin.example.com"}
+	if _, err := store.Save(value); err != nil {
+		t.Fatal(err)
+	}
+	application, err := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer application.lock.Close()
 }

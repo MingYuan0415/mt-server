@@ -108,9 +108,13 @@ button:disabled { cursor: wait; opacity: .58; }
 .readonly-row code { overflow-wrap: anywhere; font-size: 12px; }
 .inline-form { display: grid; grid-template-columns: minmax(220px, 1fr) auto; align-items: end; gap: 12px; max-width: 620px; }
 .token-list { margin-top: 22px; border-top: 1px solid var(--line); }
-.token-item { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 16px; padding: 16px 0; border-bottom: 1px solid var(--line); }
-.token-item strong, .token-item small { display: block; }
-.token-item small { margin-top: 5px; color: var(--muted); }
+.token-item, .origin-item { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 16px; padding: 16px 0; border-bottom: 1px solid var(--line); }
+.token-item strong, .token-item small, .origin-item strong, .origin-item small { display: block; }
+.token-item small, .origin-item small { margin-top: 5px; color: var(--muted); }
+.origin-list { margin-top: 14px; border-top: 1px solid var(--line); }
+.origin-item code { min-width: 0; overflow-wrap: anywhere; font-size: 13px; }
+.origin-item button:disabled { cursor: not-allowed; }
+.origin-form-row { margin-top: 14px; }
 
 dialog { width: min(620px, calc(100% - 32px)); border: 1px solid var(--line); border-radius: 6px; padding: 24px; color: var(--text); }
 dialog::backdrop { background: rgba(15, 24, 31, .58); }

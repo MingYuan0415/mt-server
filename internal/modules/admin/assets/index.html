@@ -34,6 +34,16 @@
           </div>
         </fieldset>
         <fieldset>
+          <legend>管理域名</legend>
+          <p id="setup-origin-mode" class="field-hint"></p>
+          <div id="setup-origin-list" class="origin-list"></div>
+          <div class="inline-form origin-form-row">
+            <label>HTTPS Origin<input id="setup-origin-input" type="url" placeholder="https://admin.example.com"></label>
+            <button id="setup-origin-add" class="secondary" type="button">添加</button>
+          </div>
+          <div id="setup-origin-message" class="message hidden" role="status"></div>
+        </fieldset>
+        <fieldset>
           <legend>QWeather 凭据</legend>
           <label>账户专属 API Host<input name="api_host" placeholder="account-id.re.qweatherapi.com" required></label>
           <div class="field-grid">
@@ -75,6 +85,7 @@
       <nav class="tabs" aria-label="管理页面">
         <button class="tab active" data-tab="overview" type="button">概览</button>
         <button class="tab" data-tab="qweather" type="button">和风天气</button>
+        <button class="tab" data-tab="origins" type="button">管理域名</button>
         <button class="tab" data-tab="devices" type="button">设备令牌</button>
         <button class="tab" data-tab="account" type="button">账户</button>
       </nav>
@@ -120,6 +131,17 @@
               <button class="primary" type="submit">测试并保存</button>
             </div>
           </form>
+        </section>
+
+        <section class="panel" data-panel="origins">
+          <div class="section-heading"><p class="eyebrow">管理入口</p><h2>管理域名</h2></div>
+          <p id="origin-mode" class="field-hint"></p>
+          <form id="origin-form" class="inline-form settings-form">
+            <label>HTTPS Origin<input name="origin" type="url" placeholder="https://admin.example.com" required></label>
+            <button class="primary" type="submit">添加</button>
+          </form>
+          <div id="origin-message" class="message hidden" role="status"></div>
+          <div id="origin-list" class="origin-list settings-form"></div>
         </section>
 
         <section class="panel" data-panel="devices">

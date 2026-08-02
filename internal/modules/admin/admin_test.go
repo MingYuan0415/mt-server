@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -357,7 +358,7 @@ func TestManagementAcceptsAllowlistedPublicOriginWithInternalHost(t *testing.T) 
 	}
 	runtime := &fakeRuntime{}
 	management, err := New(store, runtime, adminauth.NewSessions(),
-		adminauth.NewTransportPolicy(false, true, "https://api.example.com"),
+		adminauth.NewTransportPolicy(false, true),
 		slog.New(slog.NewTextHandler(io.Discard, nil)), "test")
 	if err != nil {
 		t.Fatal(err)
@@ -365,7 +366,8 @@ func TestManagementAcceptsAllowlistedPublicOriginWithInternalHost(t *testing.T) 
 	mux := http.NewServeMux()
 	management.RegisterRoutes(mux)
 	request := httptest.NewRequest(http.MethodPost,
-		"http://mt-server:8080/admin/api/v1/setup", strings.NewReader(`{}`))
+		"http://mt-server:8080/admin/api/v1/setup",
+		strings.NewReader(`{"admin_origins":["https://api.example.com"]}`))
 	request.Host = "mt-server:8080"
 	request.Header.Set("Origin", "https://api.example.com")
 	request.Header.Set("X-CSRF-Token", management.publicCSRF)
@@ -376,7 +378,9 @@ func TestManagementAcceptsAllowlistedPublicOriginWithInternalHost(t *testing.T) 
 		t.Fatalf("allowlisted public origin was rejected: %d %s", recorder.Code, recorder.Body.String())
 	}
 
-	contents, err := json.Marshal(validSetupRequest())
+	setupRequest := validSetupRequest()
+	setupRequest.AdminOrigins = []string{"https://api.example.com"}
+	contents, err := json.Marshal(setupRequest)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -394,6 +398,188 @@ func TestManagementAcceptsAllowlistedPublicOriginWithInternalHost(t *testing.T) 
 	cookies := recorder.Result().Cookies()
 	if len(cookies) == 0 || !cookies[0].Secure || cookies[0].SameSite != http.SameSiteStrictMode {
 		t.Fatalf("proxy session cookie is not secure: %#v", cookies)
+	}
+}
+
+func TestAdminOriginsHotSwitchAndInvalidateSessionsOnRemoval(t *testing.T) {
+	store, err := state.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := &fakeRuntime{}
+	policy := adminauth.NewTransportPolicy(false, true)
+	sessions := adminauth.NewSessions()
+	management, err := New(store, runtime, sessions, policy,
+		slog.New(slog.NewTextHandler(io.Discard, nil)), "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	management.RegisterRoutes(mux)
+	setupBody := validSetupRequest()
+	setupBody.AdminOrigins = []string{"https://old.example.com"}
+	setup := proxyPublicRequest(t, mux, management.publicCSRF,
+		"https://old.example.com", http.MethodPost, "/admin/api/v1/setup", setupBody)
+	if setup.Code != http.StatusCreated {
+		t.Fatalf("proxy setup failed: %d %s", setup.Code, setup.Body.String())
+	}
+	var setupResponse map[string]any
+	if err := json.Unmarshal(setup.Body.Bytes(), &setupResponse); err != nil {
+		t.Fatal(err)
+	}
+	oldCookie := setup.Result().Cookies()[0]
+	csrf := setupResponse["csrf_token"].(string)
+	lastDelete := proxyAuthenticatedRequest(t, mux, "https://old.example.com", http.MethodDelete,
+		"/admin/api/v1/settings/admin-origins/"+adminauth.PublicOriginID("https://old.example.com"),
+		nil, oldCookie, csrf)
+	if lastDelete.Code != http.StatusConflict || !strings.Contains(lastDelete.Body.String(), "last_admin_origin") {
+		t.Fatalf("last origin removal returned %d %s", lastDelete.Code, lastDelete.Body.String())
+	}
+	added := proxyAuthenticatedRequest(t, mux, "https://old.example.com", http.MethodPost,
+		"/admin/api/v1/settings/admin-origins", originRequest{Origin: "https://new.example.com"},
+		oldCookie, csrf)
+	if added.Code != http.StatusCreated {
+		t.Fatalf("origin add failed: %d %s", added.Code, added.Body.String())
+	}
+	stillAuthenticated := proxyAuthenticatedRequest(t, mux, "https://old.example.com", http.MethodGet,
+		"/admin/api/v1/settings/admin-origins", nil, oldCookie, csrf)
+	if stillAuthenticated.Code != http.StatusOK {
+		t.Fatal("adding an origin invalidated the current session")
+	}
+	currentDelete := proxyAuthenticatedRequest(t, mux, "https://old.example.com", http.MethodDelete,
+		"/admin/api/v1/settings/admin-origins/"+adminauth.PublicOriginID("https://old.example.com"),
+		nil, oldCookie, csrf)
+	if currentDelete.Code != http.StatusConflict || !strings.Contains(currentDelete.Body.String(), "current_admin_origin") {
+		t.Fatalf("current origin removal returned %d %s", currentDelete.Code, currentDelete.Body.String())
+	}
+	login := proxyPublicRequest(t, mux, management.publicCSRF, "https://new.example.com",
+		http.MethodPost, "/admin/api/v1/session", loginRequest{Password: "correct horse battery staple"})
+	if login.Code != http.StatusOK {
+		t.Fatalf("new origin login failed: %d %s", login.Code, login.Body.String())
+	}
+	var loginResponse map[string]string
+	if err := json.Unmarshal(login.Body.Bytes(), &loginResponse); err != nil {
+		t.Fatal(err)
+	}
+	newCookie := login.Result().Cookies()[0]
+	removed := proxyAuthenticatedRequest(t, mux, "https://new.example.com", http.MethodDelete,
+		"/admin/api/v1/settings/admin-origins/"+adminauth.PublicOriginID("https://old.example.com"),
+		nil, newCookie, loginResponse["csrf_token"])
+	if removed.Code != http.StatusNoContent {
+		t.Fatalf("old origin removal failed: %d %s", removed.Code, removed.Body.String())
+	}
+	for _, cookie := range []*http.Cookie{oldCookie, newCookie} {
+		request := proxyAuthenticatedRequest(t, mux, "https://new.example.com", http.MethodGet,
+			"/admin/api/v1/settings/admin-origins", nil, cookie, "")
+		if request.Code != http.StatusUnauthorized {
+			t.Fatalf("session survived origin removal: %d", request.Code)
+		}
+	}
+	oldLogin := proxyPublicRequest(t, mux, management.publicCSRF, "https://old.example.com",
+		http.MethodPost, "/admin/api/v1/session", loginRequest{Password: "correct horse battery staple"})
+	if oldLogin.Code != http.StatusForbidden || !strings.Contains(oldLogin.Body.String(), "origin_rejected") {
+		t.Fatalf("removed origin remained active: %d %s", oldLogin.Code, oldLogin.Body.String())
+	}
+}
+
+func TestProxySetupRequiresCurrentOriginInCandidateState(t *testing.T) {
+	store, err := state.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	management, err := New(store, &fakeRuntime{}, adminauth.NewSessions(),
+		adminauth.NewTransportPolicy(false, true),
+		slog.New(slog.NewTextHandler(io.Discard, nil)), "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	management.RegisterRoutes(mux)
+	request := validSetupRequest()
+	request.AdminOrigins = []string{"https://other.example.com"}
+	response := proxyPublicRequest(t, mux, management.publicCSRF,
+		"https://api.example.com", http.MethodPost, "/admin/api/v1/setup", request)
+	if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), "origin_rejected") {
+		t.Fatalf("setup without its current origin returned %d %s", response.Code, response.Body.String())
+	}
+	if _, err := store.Load(); !errors.Is(err, state.ErrNotInitialized) {
+		t.Fatalf("rejected setup persisted state: %v", err)
+	}
+}
+
+func TestAdminOriginWriteFailureRetainsActivePolicy(t *testing.T) {
+	store, err := state.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := adminauth.NewTransportPolicy(false, true)
+	management, err := New(store, &fakeRuntime{}, adminauth.NewSessions(), policy,
+		slog.New(slog.NewTextHandler(io.Discard, nil)), "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	management.RegisterRoutes(mux)
+	setupBody := validSetupRequest()
+	setupBody.AdminOrigins = []string{"https://old.example.com"}
+	setup := proxyPublicRequest(t, mux, management.publicCSRF,
+		"https://old.example.com", http.MethodPost, "/admin/api/v1/setup", setupBody)
+	var setupResponse map[string]any
+	if err := json.Unmarshal(setup.Body.Bytes(), &setupResponse); err != nil {
+		t.Fatal(err)
+	}
+	store.RenameForTest(func(string, string) error { return errors.New("injected rename failure") })
+	added := proxyAuthenticatedRequest(t, mux, "https://old.example.com", http.MethodPost,
+		"/admin/api/v1/settings/admin-origins", originRequest{Origin: "https://new.example.com"},
+		setup.Result().Cookies()[0], setupResponse["csrf_token"].(string))
+	if added.Code != http.StatusInternalServerError {
+		t.Fatalf("write failure returned %d %s", added.Code, added.Body.String())
+	}
+	request := httptest.NewRequest(http.MethodPost, "http://mt-server:8080/admin/api/v1/session", nil)
+	request.Header.Set("Origin", "https://new.example.com")
+	if policy.SameOrigin(request) {
+		t.Fatal("failed write activated the candidate origin")
+	}
+	request.Header.Set("Origin", "https://old.example.com")
+	if !policy.SameOrigin(request) {
+		t.Fatal("failed write removed the active origin")
+	}
+	store.RenameForTest(os.Rename)
+}
+
+func TestAdminOriginDurabilityWarningStillActivatesPolicy(t *testing.T) {
+	store, err := state.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := adminauth.NewTransportPolicy(false, true)
+	management, err := New(store, &fakeRuntime{}, adminauth.NewSessions(), policy,
+		slog.New(slog.NewTextHandler(io.Discard, nil)), "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	management.RegisterRoutes(mux)
+	setupBody := validSetupRequest()
+	setupBody.AdminOrigins = []string{"https://old.example.com"}
+	setup := proxyPublicRequest(t, mux, management.publicCSRF,
+		"https://old.example.com", http.MethodPost, "/admin/api/v1/setup", setupBody)
+	var setupResponse map[string]any
+	if err := json.Unmarshal(setup.Body.Bytes(), &setupResponse); err != nil {
+		t.Fatal(err)
+	}
+	store.SyncDirectoryForTest(func(string) error { return errors.New("injected directory sync failure") })
+	added := proxyAuthenticatedRequest(t, mux, "https://old.example.com", http.MethodPost,
+		"/admin/api/v1/settings/admin-origins", originRequest{Origin: "https://new.example.com"},
+		setup.Result().Cookies()[0], setupResponse["csrf_token"].(string))
+	if added.Code != http.StatusCreated ||
+		added.Header().Get(stateWarningHeader) != stateWarningValue {
+		t.Fatalf("unexpected durability response %d %#v", added.Code, added.Header())
+	}
+	request := httptest.NewRequest(http.MethodPost, "http://mt-server:8080/admin/api/v1/session", nil)
+	request.Header.Set("Origin", "https://new.example.com")
+	if !policy.SameOrigin(request) || store.DurabilityConfirmed() {
+		t.Fatal("committed origin was not activated with a retained durability warning")
 	}
 }
 
@@ -657,6 +843,35 @@ func publicRequest(t *testing.T, handler http.Handler, method, path string,
 	request.Header.Set("Origin", "http://api.example.com")
 	request.Header.Set("X-CSRF-Token", csrf)
 	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	return recorder
+}
+
+func proxyPublicRequest(t *testing.T, handler http.Handler, csrf, origin, method, path string,
+	body any) *httptest.ResponseRecorder {
+	t.Helper()
+	contents, _ := json.Marshal(body)
+	request := httptest.NewRequest(method, "http://mt-server:8080"+path, bytes.NewReader(contents))
+	request.Host = "mt-server:8080"
+	request.Header.Set("Origin", origin)
+	request.Header.Set("X-CSRF-Token", csrf)
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	return recorder
+}
+
+func proxyAuthenticatedRequest(t *testing.T, handler http.Handler, origin, method, path string,
+	body any, cookie *http.Cookie, csrf string) *httptest.ResponseRecorder {
+	t.Helper()
+	contents, _ := json.Marshal(body)
+	request := httptest.NewRequest(method, "http://mt-server:8080"+path, bytes.NewReader(contents))
+	request.Host = "mt-server:8080"
+	request.Header.Set("Origin", origin)
+	request.Header.Set("X-CSRF-Token", csrf)
+	request.Header.Set("Content-Type", "application/json")
+	request.AddCookie(cookie)
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, request)
 	return recorder

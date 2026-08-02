@@ -2,6 +2,7 @@ package adminauth
 
 import (
 	"crypto/tls"
+	"fmt"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -32,9 +33,69 @@ func TestPasswordHashAndVerification(t *testing.T) {
 	}
 }
 
+func TestNormalizePublicOrigins(t *testing.T) {
+	values, err := NormalizePublicOrigins([]string{
+		"https://API.Example.com:0443", "https://127.0.0.1:8443", "https://[2001:DB8::1]:9443",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"https://api.example.com", "https://127.0.0.1:8443", "https://[2001:db8::1]:9443",
+	}
+	if fmt.Sprint(values) != fmt.Sprint(want) {
+		t.Fatalf("unexpected normalized origins %#v", values)
+	}
+	invalid := []string{
+		"http://api.example.com", "https://user@api.example.com", "https://api.example.com/path",
+		"https://api.example.com?x=1", "https://api.example.com#x", "https://bad_host.example.com",
+		"https://-bad.example.com", "https://api.example.com:", "https://api.example.com:65536",
+	}
+	for _, value := range invalid {
+		if _, err := NormalizePublicOrigin(value); err == nil {
+			t.Fatalf("invalid origin %q was accepted", value)
+		}
+	}
+	if _, err := NormalizePublicOrigins([]string{
+		"https://api.example.com", "https://API.EXAMPLE.COM:443",
+	}); err == nil {
+		t.Fatal("duplicate canonical origin was accepted")
+	}
+	overLimit := make([]string, MaximumPublicOrigins+1)
+	for index := range overLimit {
+		overLimit[index] = fmt.Sprintf("https://host-%d.example.com", index)
+	}
+	if _, err := NormalizePublicOrigins(overLimit); err == nil {
+		t.Fatal("origin limit was not enforced")
+	}
+}
+
+func TestTransportPolicyHotSwitchesProxyOrigins(t *testing.T) {
+	policy := NewTransportPolicy(false, true)
+	policy.ReplacePublicOrigins([]string{"https://old.example.com"})
+	request := httptest.NewRequest("POST", "http://mt-server:8080/admin/api/v1/session", nil)
+	request.Header.Set("Origin", "https://old.example.com")
+	if !policy.SameOrigin(request) {
+		t.Fatal("initial origin was rejected")
+	}
+	policy.ReplacePublicOrigins([]string{"https://new.example.com"})
+	if policy.SameOrigin(request) {
+		t.Fatal("removed origin survived hot switch")
+	}
+	request.Header.Set("Origin", "https://new.example.com")
+	if !policy.SameOrigin(request) {
+		t.Fatal("new origin was not activated")
+	}
+	if _, err := policy.ValidatePublicOrigins(nil); err == nil {
+		t.Fatal("proxy policy accepted an empty origin list")
+	}
+}
+
 func TestTransportPolicyAcceptsExplicitPublicOrigins(t *testing.T) {
-	policy := NewTransportPolicy(false, true,
-		"https://api.example.com", "https://[2001:db8::1]:8443")
+	policy := NewTransportPolicy(false, true)
+	policy.ReplacePublicOrigins([]string{
+		"https://api.example.com", "https://[2001:db8::1]:8443",
+	})
 	for _, origin := range []string{
 		"https://API.EXAMPLE.COM:443",
 		"https://[2001:DB8::1]:8443",
@@ -88,6 +149,7 @@ func TestSessionsValidateCSRFExpireAndClear(t *testing.T) {
 
 func TestTransportPolicyRequiresSecureOrExplicitInsecureMode(t *testing.T) {
 	policy := NewTransportPolicy(false, true)
+	policy.ReplacePublicOrigins([]string{"https://api.example.com"})
 	request := httptest.NewRequest("POST", "http://api.example.com/admin/api/v1/session", nil)
 	request.Header.Set("Origin", "https://api.example.com")
 	if !policy.Secure(request) || !policy.AllowWrite(request) || !policy.SameOrigin(request) {

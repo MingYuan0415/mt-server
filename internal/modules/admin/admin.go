@@ -93,6 +93,9 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /admin/api/v1/settings/qweather", h.requireSession(h.getQWeather, false))
 	mux.HandleFunc("POST /admin/api/v1/settings/qweather/test", h.requireSession(h.testQWeather, true))
 	mux.HandleFunc("PUT /admin/api/v1/settings/qweather", h.requireSession(h.putQWeather, true))
+	mux.HandleFunc("GET /admin/api/v1/settings/admin-origins", h.requireSession(h.listAdminOrigins, false))
+	mux.HandleFunc("POST /admin/api/v1/settings/admin-origins", h.requireSession(h.addAdminOrigin, true))
+	mux.HandleFunc("DELETE /admin/api/v1/settings/admin-origins/{id}", h.requireSession(h.deleteAdminOrigin, true))
 	mux.HandleFunc("GET /admin/api/v1/device-tokens", h.requireSession(h.listTokens, false))
 	mux.HandleFunc("POST /admin/api/v1/device-tokens", h.requireSession(h.createToken, true))
 	mux.HandleFunc("DELETE /admin/api/v1/device-tokens/{id}", h.requireSession(h.deleteToken, true))
@@ -100,9 +103,10 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 }
 
 type setupRequest struct {
-	Password   string        `json:"password"`
-	QWeather   qweatherInput `json:"qweather"`
-	DeviceName string        `json:"device_name"`
+	Password     string        `json:"password"`
+	QWeather     qweatherInput `json:"qweather"`
+	DeviceName   string        `json:"device_name"`
+	AdminOrigins []string      `json:"admin_origins,omitempty"`
 }
 
 type qweatherInput struct {
@@ -135,6 +139,10 @@ type passwordRequest struct {
 	NewPassword     string `json:"new_password"`
 }
 
+type originRequest struct {
+	Origin string `json:"origin"`
+}
+
 func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 	_, err := h.store.Load()
 	configured := err == nil
@@ -157,20 +165,24 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	httpapi.WriteJSON(w, http.StatusOK, map[string]any{
-		"configured":       configured,
-		"status":           ready,
-		"version":          h.version,
-		"secure_transport": h.transport.Secure(r),
-		"state_durability": durability,
-		"csrf_token":       h.publicCSRF,
+		"configured":        configured,
+		"status":            ready,
+		"version":           h.version,
+		"secure_transport":  h.transport.Secure(r),
+		"admin_origin_mode": h.transport.OriginMode(),
+		"state_durability":  durability,
+		"csrf_token":        h.publicCSRF,
 	})
 }
 
 func (h *Handler) setup(w http.ResponseWriter, r *http.Request) {
-	if !h.preparePublicWrite(w, r, h.setupLimit) {
+	if !h.preparePublicWriteWithoutOrigin(w, r, h.setupLimit) {
 		return
 	}
 	if _, err := h.store.Load(); err == nil {
+		if !h.requireRequestOrigin(w, r) {
+			return
+		}
 		httpapi.WriteError(w, r, http.StatusConflict,
 			"already_configured", "service setup is already complete")
 		return
@@ -181,6 +193,18 @@ func (h *Handler) setup(w http.ResponseWriter, r *http.Request) {
 	}
 	var request setupRequest
 	if !decodeJSON(w, r, &request) {
+		return
+	}
+	origins, err := h.transport.ValidatePublicOrigins(request.AdminOrigins)
+	if err != nil {
+		httpapi.WriteError(w, r, http.StatusBadRequest,
+			"invalid_admin_origin", err.Error())
+		return
+	}
+	if !h.transport.SetupOriginAllowed(r, origins) {
+		h.logWriteRejection(r, "origin")
+		httpapi.WriteError(w, r, http.StatusForbidden,
+			"origin_rejected", "management request origin is not present in setup settings")
 		return
 	}
 	if !h.acquirePasswordSlot(w, r) {
@@ -200,7 +224,7 @@ func (h *Handler) setup(w http.ResponseWriter, r *http.Request) {
 	value := state.State{
 		SchemaVersion: state.SchemaVersion,
 		UpdatedAt:     time.Now().UTC(),
-		Admin:         state.AdminState{Password: passwordHash},
+		Admin:         state.AdminState{Password: passwordHash, PublicOrigins: origins},
 		QWeather:      qweatherState(request.QWeather, ""),
 		Cache:         state.DefaultCache(),
 		DeviceTokens:  []state.DeviceToken{tokenState},
@@ -242,6 +266,7 @@ func (h *Handler) setup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.reportWriteResult(w, r, writeResult)
+	h.transport.ReplacePublicOrigins(origins)
 	prepared.Activate()
 	h.setupLimit.Reset()
 	keepSession = true
@@ -381,6 +406,122 @@ func (h *Handler) putQWeather(w http.ResponseWriter, r *http.Request) {
 	httpapi.WriteJSON(w, http.StatusOK, map[string]any{
 		"status": "saved", "public_key_fingerprint": fingerprint, "verification": verification,
 	})
+}
+
+func (h *Handler) listAdminOrigins(w http.ResponseWriter, r *http.Request) {
+	value, ok := h.loadState(w, r)
+	if !ok {
+		return
+	}
+	httpapi.WriteJSON(w, http.StatusOK, map[string]any{
+		"mode": h.transport.OriginMode(), "maximum": adminauth.MaximumPublicOrigins,
+		"origins": publicOrigins(value.Admin.PublicOrigins),
+	})
+}
+
+func (h *Handler) addAdminOrigin(w http.ResponseWriter, r *http.Request) {
+	var request originRequest
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	origin, err := adminauth.NormalizePublicOrigin(request.Origin)
+	if err != nil {
+		httpapi.WriteError(w, r, http.StatusBadRequest,
+			"invalid_admin_origin", err.Error())
+		return
+	}
+	h.changeMu.Lock()
+	defer h.changeMu.Unlock()
+	value, ok := h.loadState(w, r)
+	if !ok {
+		return
+	}
+	for _, existing := range value.Admin.PublicOrigins {
+		if existing == origin {
+			httpapi.WriteError(w, r, http.StatusConflict,
+				"admin_origin_exists", "management origin already exists")
+			return
+		}
+	}
+	if len(value.Admin.PublicOrigins) >= adminauth.MaximumPublicOrigins {
+		httpapi.WriteError(w, r, http.StatusConflict,
+			"admin_origin_limit_reached", "management origin limit reached")
+		return
+	}
+	value.Admin.PublicOrigins = append(value.Admin.PublicOrigins, origin)
+	value.UpdatedAt = time.Now().UTC()
+	normalized, err := h.transport.ValidatePublicOrigins(value.Admin.PublicOrigins)
+	if err != nil {
+		httpapi.WriteError(w, r, http.StatusBadRequest,
+			"invalid_admin_origin", err.Error())
+		return
+	}
+	writeResult, err := h.store.Save(value)
+	if err != nil {
+		httpapi.WriteError(w, r, http.StatusInternalServerError,
+			"state_write_failed", "could not save management origin")
+		return
+	}
+	h.reportWriteResult(w, r, writeResult)
+	h.transport.ReplacePublicOrigins(normalized)
+	h.logger.Info("management origin added")
+	httpapi.WriteJSON(w, http.StatusCreated, publicOrigin(origin))
+}
+
+func (h *Handler) deleteAdminOrigin(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	h.changeMu.Lock()
+	defer h.changeMu.Unlock()
+	value, ok := h.loadState(w, r)
+	if !ok {
+		return
+	}
+	target := ""
+	filtered := make([]string, 0, len(value.Admin.PublicOrigins))
+	for _, origin := range value.Admin.PublicOrigins {
+		if adminauth.PublicOriginID(origin) == id {
+			target = origin
+			continue
+		}
+		filtered = append(filtered, origin)
+	}
+	if target == "" {
+		httpapi.WriteError(w, r, http.StatusNotFound,
+			"admin_origin_not_found", "management origin not found")
+		return
+	}
+	if h.transport.BehindHTTPSProxy() && len(filtered) == 0 {
+		httpapi.WriteError(w, r, http.StatusConflict,
+			"last_admin_origin", "the last management origin cannot be removed in proxy mode")
+		return
+	}
+	requestOrigin, validOrigin := adminauth.RequestOrigin(r)
+	if validOrigin && requestOrigin == target {
+		httpapi.WriteError(w, r, http.StatusConflict,
+			"current_admin_origin", "the current management origin cannot be removed")
+		return
+	}
+	normalized, err := h.transport.ValidatePublicOrigins(filtered)
+	if err != nil {
+		httpapi.WriteError(w, r, http.StatusBadRequest,
+			"invalid_admin_origin", err.Error())
+		return
+	}
+	value.Admin.PublicOrigins = normalized
+	value.UpdatedAt = time.Now().UTC()
+	writeResult, err := h.store.Save(value)
+	if err != nil {
+		httpapi.WriteError(w, r, http.StatusInternalServerError,
+			"state_write_failed", "could not remove management origin")
+		return
+	}
+	h.reportWriteResult(w, r, writeResult)
+	h.transport.ReplacePublicOrigins(normalized)
+	h.sessions.Clear()
+	h.clearSessionCookie(w, r)
+	h.logger.Info("management origin removed")
+	w.Header().Set("Cache-Control", "private, no-store")
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *Handler) listTokens(w http.ResponseWriter, r *http.Request) {
@@ -590,6 +731,40 @@ func (h *Handler) preparePublicWrite(w http.ResponseWriter, r *http.Request,
 	return true
 }
 
+func (h *Handler) preparePublicWriteWithoutOrigin(w http.ResponseWriter, r *http.Request,
+	limiter *adminauth.Limiter) bool {
+	if !h.transport.AllowWrite(r) {
+		httpapi.WriteError(w, r, http.StatusForbidden,
+			"https_required", "HTTPS is required for management changes")
+		return false
+	}
+	providedCSRF := r.Header.Get("X-CSRF-Token")
+	if len(providedCSRF) != len(h.publicCSRF) ||
+		subtle.ConstantTimeCompare([]byte(providedCSRF), []byte(h.publicCSRF)) != 1 {
+		h.logWriteRejection(r, "csrf")
+		httpapi.WriteError(w, r, http.StatusForbidden,
+			"csrf_rejected", "management CSRF token is invalid")
+		return false
+	}
+	if !limiter.Allow() {
+		w.Header().Set("Retry-After", "60")
+		httpapi.WriteError(w, r, http.StatusTooManyRequests,
+			"rate_limited", "too many authentication attempts")
+		return false
+	}
+	return true
+}
+
+func (h *Handler) requireRequestOrigin(w http.ResponseWriter, r *http.Request) bool {
+	if h.transport.SameOrigin(r) {
+		return true
+	}
+	h.logWriteRejection(r, "origin")
+	httpapi.WriteError(w, r, http.StatusForbidden,
+		"origin_rejected", "management request origin could not be verified")
+	return false
+}
+
 func (h *Handler) logWriteRejection(r *http.Request, category string) {
 	h.logger.Warn("management write rejected",
 		"category", category, "request_id", httpapi.RequestID(r.Context()))
@@ -793,6 +968,18 @@ func publicToken(token state.DeviceToken) map[string]any {
 	return map[string]any{
 		"id": token.ID, "name": token.Name, "created_at": token.CreatedAt,
 	}
+}
+
+func publicOrigins(origins []string) []map[string]string {
+	result := make([]map[string]string, 0, len(origins))
+	for _, origin := range origins {
+		result = append(result, publicOrigin(origin))
+	}
+	return result
+}
+
+func publicOrigin(origin string) map[string]string {
+	return map[string]string{"id": adminauth.PublicOriginID(origin), "origin": origin}
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, target any) bool {

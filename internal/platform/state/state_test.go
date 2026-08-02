@@ -86,6 +86,30 @@ func TestStoreConcurrentInitialCommitHasOneWinner(t *testing.T) {
 	}
 }
 
+func TestStateDirectoryLockIsExclusive(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := store.AcquireLock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AcquireLock(); !errors.Is(err, ErrLocked) {
+		t.Fatalf("expected exclusive lock rejection, got %v", err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.AcquireLock()
+	if err != nil {
+		t.Fatalf("released lock could not be reacquired: %v", err)
+	}
+	if err := second.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestStoreRejectsCorruptState(t *testing.T) {
 	directory := t.TempDir()
 	store, err := NewStore(directory)
@@ -128,6 +152,21 @@ func TestStoreRejectsPreviousLocationSchemaBeforeUnknownFields(t *testing.T) {
 	if _, err := store.Load(); err == nil ||
 		!strings.Contains(err.Error(), "unsupported state schema version 1") {
 		t.Fatalf("expected explicit previous-schema error, got %v", err)
+	}
+}
+
+func TestStoreRejectsSchemaV2WithUpgradeGuidance(t *testing.T) {
+	directory := t.TempDir()
+	store, err := NewStore(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "state.json"),
+		[]byte(`{"schema_version":2}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Load(); err == nil || !strings.Contains(err.Error(), "back up and clear") {
+		t.Fatalf("expected explicit v2 upgrade guidance, got %v", err)
 	}
 }
 
@@ -213,9 +252,12 @@ func minimalState(now time.Time) State {
 	return State{
 		SchemaVersion: SchemaVersion,
 		UpdatedAt:     now,
-		Admin:         AdminState{Password: PasswordHash{Algorithm: "test"}},
-		QWeather:      QWeatherState{APIHost: "account.re.qweatherapi.com"},
-		Cache:         DefaultCache(),
-		DeviceTokens:  []DeviceToken{{ID: "device", Name: "Device", Hash: strings.Repeat("0", 64)}},
+		Admin: AdminState{
+			Password:      PasswordHash{Algorithm: "test"},
+			PublicOrigins: []string{"https://admin.example.com"},
+		},
+		QWeather:     QWeatherState{APIHost: "account.re.qweatherapi.com"},
+		Cache:        DefaultCache(),
+		DeviceTokens: []DeviceToken{{ID: "device", Name: "Device", Hash: strings.Repeat("0", 64)}},
 	}
 }

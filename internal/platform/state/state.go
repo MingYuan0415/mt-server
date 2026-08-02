@@ -15,7 +15,7 @@ import (
 
 const (
 	// SchemaVersion is the current on-disk format.
-	SchemaVersion = 2
+	SchemaVersion = 3
 	maximumSize   = 1024 * 1024
 )
 
@@ -36,9 +36,10 @@ type State struct {
 	DeviceTokens  []DeviceToken `json:"device_tokens"`
 }
 
-// AdminState contains the password verifier only.
+// AdminState contains management authentication and browser trust settings.
 type AdminState struct {
-	Password PasswordHash `json:"password"`
+	Password      PasswordHash `json:"password"`
+	PublicOrigins []string     `json:"public_origins"`
 }
 
 // PasswordHash records an Argon2id verifier and its parameters.
@@ -206,6 +207,9 @@ func (s *Store) loadLocked() (State, error) {
 		return State{}, fmt.Errorf("decode application state: %w", err)
 	}
 	if header.SchemaVersion != SchemaVersion {
+		if header.SchemaVersion == 2 {
+			return State{}, errors.New("unsupported state schema version 2; back up and clear the v0.1 state before v0.2 setup")
+		}
 		return State{}, fmt.Errorf("unsupported state schema version %d", header.SchemaVersion)
 	}
 	var value State

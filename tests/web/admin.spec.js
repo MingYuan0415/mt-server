@@ -30,6 +30,7 @@ async function installBackend(page, initialConfigured) {
     publicCSRF: "public-csrf-token",
     sessionCSRF: "session-csrf-token",
     qweather: { ...qweather },
+    origins: [],
     tokens: [{ id: "device_initial", name: "初始设备", created_at: "2026-08-02T00:00:00Z" }],
     stateDurability: initialConfigured ? "confirmed" : "not_applicable",
     warnNextWrite: false,
@@ -63,6 +64,7 @@ async function installBackend(page, initialConfigured) {
         status: backend.configured ? "ready" : "setup_required",
         version: "web-test",
         secure_transport: false,
+        admin_origin_mode: "direct_same_origin",
         state_durability: backend.stateDurability,
         csrf_token: backend.publicCSRF
       });
@@ -114,6 +116,21 @@ async function installBackend(page, initialConfigured) {
     if (path === "/settings/qweather" && method === "PUT") {
       backend.qweather = { ...backend.qweather, ...request.postDataJSON(), private_key_configured: true };
       return json(200, { status: "saved", public_key_fingerprint: qweather.public_key_fingerprint, verification });
+    }
+    if (path === "/settings/admin-origins" && method === "GET") {
+      return json(200, { mode: "direct_same_origin", maximum: 16, origins: backend.origins });
+    }
+    if (path === "/settings/admin-origins" && method === "POST") {
+      const origin = request.postDataJSON().origin;
+      const entry = { id: `origin-${backend.origins.length + 1}`, origin };
+      backend.origins.push(entry);
+      return json(201, entry);
+    }
+    if (path.startsWith("/settings/admin-origins/") && method === "DELETE") {
+      const id = decodeURIComponent(path.slice("/settings/admin-origins/".length));
+      backend.origins = backend.origins.filter(origin => origin.id !== id);
+      backend.loggedIn = false;
+      return json(204);
     }
     if (path === "/device-tokens" && method === "GET") return json(200, { tokens: backend.tokens });
     if (path === "/device-tokens" && method === "POST") {
@@ -203,6 +220,7 @@ test("@desktop completes setup and rotates configuration", async ({ page }, test
     })
   });
   expect(backend.writes[0].body).not.toHaveProperty("location");
+  expect(backend.writes[0].body.admin_origins).toEqual([]);
   await page.getByRole("button", { name: "我已保存" }).click();
   await expect(page.locator("#raw-token")).toHaveText("");
   await expect(page.locator("#overview-verification")).toContainText("浏览器临时位置");
@@ -217,6 +235,11 @@ test("@desktop completes setup and rotates configuration", async ({ page }, test
   await page.getByRole("button", { name: "测试并保存" }).click();
   await expect(page.locator("#qweather-message")).toContainText("已保存并生效");
   await expect(page.locator("#qweather-verification")).toContainText("多云");
+
+  await page.getByRole("button", { name: "管理域名" }).click();
+  await page.locator('#origin-form [name="origin"]').fill("https://admin.example.com");
+  await page.locator("#origin-form").getByRole("button", { name: "添加" }).click();
+  await expect(page.locator("#origin-list")).toContainText("https://admin.example.com");
 
   await page.getByRole("button", { name: "设备令牌" }).click();
   backend.warnNextWrite = true;
@@ -234,12 +257,17 @@ test("@desktop completes setup and rotates configuration", async ({ page }, test
 
 test("@mobile logs in and keeps the settings layout usable", async ({ page }, testInfo) => {
   const backend = await installBackend(page, true);
+  backend.origins = [{ id: "origin-current", origin: "https://admin.example.test:18443" }];
   await page.goto("/admin/");
   await expect(page.getByRole("heading", { name: "mt-server" })).toBeVisible();
   await page.locator('#login-form [name="password"]').fill("correct horse battery staple");
   await page.getByRole("button", { name: "登录" }).click();
   await expect(page.locator("#dashboard-view")).toBeVisible();
   expect(backend.writes[0]).toMatchObject({ path: "/session", csrf: backend.publicCSRF });
+
+  await page.getByRole("button", { name: "管理域名" }).click();
+  const currentOrigin = page.locator(".origin-item").filter({ hasText: "https://admin.example.test:18443" });
+  await expect(currentOrigin.getByRole("button", { name: "删除" })).toBeDisabled();
 
   await page.getByRole("button", { name: "和风天气" }).click();
   await expect(page.getByRole("heading", { name: "QWeather" })).toBeVisible();
@@ -252,6 +280,7 @@ test("@mobile logs in and keeps the settings layout usable", async ({ page }, te
 test("@desktop real management handler completes the lifecycle", async ({ page }) => {
   await page.goto("/admin/");
   await expect(page.getByRole("heading", { name: "连接和风天气" })).toBeVisible();
+  await expect(page.locator("#setup-origin-list")).toContainText("https://admin.example.test:18443");
 
   const setup = page.locator("#setup-form");
   await setup.locator('[name="password"]').fill("correct horse battery staple");
@@ -271,6 +300,21 @@ test("@desktop real management handler completes the lifecycle", async ({ page }
   await expect(page.locator("#token-dialog")).toBeVisible();
   await expect(page.locator("#raw-token")).toHaveText(firstToken);
   await page.getByRole("button", { name: "我已保存" }).click();
+
+  await page.getByRole("button", { name: "管理域名" }).click();
+  await page.locator('#origin-form [name="origin"]').fill("https://new.example.test:18443");
+  await page.locator("#origin-form").getByRole("button", { name: "添加" }).click();
+  await expect(page.locator("#origin-list")).toContainText("https://new.example.test:18443");
+  await page.goto("https://new.example.test:18443/admin/");
+  await page.locator('#login-form [name="password"]').fill("correct horse battery staple");
+  await page.getByRole("button", { name: "登录" }).click();
+  await page.getByRole("button", { name: "管理域名" }).click();
+  const oldOrigin = page.locator(".origin-item").filter({ hasText: "https://admin.example.test:18443" });
+  page.once("dialog", dialog => dialog.accept());
+  await oldOrigin.getByRole("button", { name: "删除" }).click();
+  await expect(page.locator("#login-view")).toBeVisible();
+  await page.locator('#login-form [name="password"]').fill("correct horse battery staple");
+  await page.getByRole("button", { name: "登录" }).click();
 
   await page.getByRole("button", { name: "和风天气" }).click();
   await page.locator('#qweather-form [name="project_id"]').fill("project-next");

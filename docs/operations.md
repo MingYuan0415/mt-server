@@ -24,7 +24,7 @@ MT_PUBLIC_HOST=api.example.com docker compose -f deploy/compose.https.yaml pull
 MT_PUBLIC_HOST=api.example.com docker compose -f deploy/compose.https.yaml up -d
 ```
 
-Caddy 与源站只通过内部 Docker 网络通信，源站不发布宿主端口。模板同时设置 `MT_ADMIN_BEHIND_HTTPS_PROXY=true` 和 `MT_ADMIN_PUBLIC_ORIGINS=https://${MT_PUBLIC_HOST}`，因此管理 Cookie 带 `Secure`，同源校验也不依赖代理传给源站的内部 `Host`。首次初始化页面公开前，应使用防火墙或上游访问策略限制管理员访问。
+Caddy 与源站只通过内部 Docker 网络通信，源站不发布宿主端口。模板设置 `MT_ADMIN_BEHIND_HTTPS_PROXY=true`，因此管理 Cookie 带 `Secure`；初始化页面会把当前 HTTPS Origin 保存到私有状态，同源校验不依赖代理传给源站的内部 `Host`。首次初始化页面公开前，应使用防火墙或上游访问策略限制管理员访问。
 
 ## 现有反向代理
 
@@ -32,13 +32,30 @@ Caddy 与源站只通过内部 Docker 网络通信，源站不发布宿主端口
 
 - 源站保持普通 HTTP，仅允许代理网络访问。
 - 设置 `MT_ADMIN_ALLOW_INSECURE_HTTP=false` 和 `MT_ADMIN_BEHIND_HTTPS_PROXY=true`。
-- 设置 `MT_ADMIN_PUBLIC_ORIGINS=https://api.example.com`；多个入口使用逗号分隔，最多 16 个。
+- 通过公开 HTTPS 域名打开初始化页面；当前 Origin 会自动加入候选列表。
 - 保留天气请求中的 `Authorization` 和 `X-MT-Location-*` 请求头。
 - 不需要转发 `X-Forwarded-For` 或任何代理地理位置头；服务不会读取它们。
 
-Origin 必须是完整 HTTPS Origin，可包含 IPv4、带方括号的 IPv6 和非默认端口；主机名大小写及默认 `:443` 会被规范化。路径、查询、片段、用户信息、HTTP 和重复项会导致服务启动失败。Cloudflare Tunnel 与其他代理不再需要覆盖源站 `Host`；服务不会读取 `Forwarded`、`X-Forwarded-Host` 或 `X-Forwarded-Proto`。修改白名单后重启容器，并刷新管理页面取得新的 CSRF token。
+Origin 必须是完整 HTTPS Origin，可包含 IPv4、带方括号的 IPv6 和非默认端口；主机名大小写及默认 `:443` 会被规范化。路径、查询、片段、用户信息、HTTP 和重复项会被拒绝。Cloudflare Tunnel 与其他代理不需要覆盖源站 `Host`；服务不会读取 `Forwarded`、`X-Forwarded-Host` 或 `X-Forwarded-Proto`。
 
 `deploy/examples/` 提供 Nginx、Traefik 和 Cloudflare Tunnel 的普通 HTTPS 接入片段。入口实现不改变天气 API 的处理语义。
+
+## 管理域名轮换与恢复
+
+管理页面最多保存 16 个 HTTPS Origin。正常更换顺序为：在旧入口添加新 Origin、确认新域名的 DNS 与代理可用、从新域名重新登录、删除旧 Origin。当前正在访问的 Origin 不能删除；删除其他 Origin 后所有管理会话失效，需要在新入口重新登录。添加和删除均在状态提交后立即生效，不需要重启容器。
+
+如果所有网页入口都已失效，先停止业务容器，再使用同一状态卷执行离线命令：
+
+```sh
+MT_PUBLIC_HOST=api.example.com docker compose -f deploy/compose.https.yaml stop mt-server
+MT_PUBLIC_HOST=api.example.com docker compose -f deploy/compose.https.yaml run --rm --no-deps mt-server \
+  admin-origin list
+MT_PUBLIC_HOST=api.example.com docker compose -f deploy/compose.https.yaml run --rm --no-deps mt-server \
+  admin-origin add https://admin.example.com
+MT_PUBLIC_HOST=api.example.com docker compose -f deploy/compose.https.yaml start mt-server
+```
+
+也可用 `admin-origin remove https://old.example.com` 删除入口。HTTPS 代理模式不允许删除最后一个 Origin。服务运行时持有状态目录独占锁；若未停止容器，离线命令会拒绝修改，不能强行绕过。
 
 ## 天气 API 请求
 
@@ -90,6 +107,19 @@ curl http://127.0.0.1:8080/health/ready
 
 - `mt-server-state` 卷包含明文 QWeather 私钥和管理员验证器，必须使用加密备份并限制读取权限。
 - 仅部署语义化版本标签或镜像 digest，禁止使用 `latest`。
-- schema v1 预览状态不受支持；删除旧 `state.json` 后重新初始化。
+- v0.2.0 使用 state schema v3，不迁移 v0.1.x 的 schema v2。升级前必须加密备份 `mt-server-state`，停止服务并仅删除 mt-server 状态卷；不得删除 Caddy 的 `caddy-data` 或 `caddy-config` 卷。启动 v0.2.0 后通过管理网页重新配置管理员、管理域名、QWeather 和设备令牌。
 - 以后升级前备份状态卷，更新固定镜像版本后观察 `/health/ready`、容器重启次数和最近日志。
-- 回滚镜像时必须确认其支持当前 `state.schema_version`。
+- v0.1.x 无法读取 schema v3；回滚旧镜像前必须恢复升级前的 schema v2 状态卷备份。
+
+HTTPS 模板重置旧状态时，先停止整套服务并查询精确卷名，再只删除带 `com.docker.compose.volume=mt-server-state` 标签的卷：
+
+```sh
+MT_PUBLIC_HOST=api.example.com docker compose -f deploy/compose.https.yaml down
+docker volume ls \
+  --filter label=com.docker.compose.volume=mt-server-state \
+  --format '{{.Name}}'
+docker volume rm <上一步输出的mt-server状态卷名>
+MT_PUBLIC_HOST=api.example.com docker compose -f deploy/compose.https.yaml up -d
+```
+
+不得使用 `docker compose down -v`，它会同时删除 Caddy 证书和配置卷。

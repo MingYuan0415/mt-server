@@ -25,6 +25,12 @@ func main() {
 				os.Exit(1)
 			}
 			return
+		case "admin-origin":
+			if err := runAdminOrigin(os.Args[2:]); err != nil {
+				_, _ = fmt.Fprintln(os.Stderr, "admin origin error:", err)
+				os.Exit(1)
+			}
+			return
 		default:
 			_, _ = fmt.Fprintln(os.Stderr, "unknown command")
 			os.Exit(2)

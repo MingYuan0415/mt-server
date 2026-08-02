@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "mt-server management API",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "description": "Same-origin API used by the embedded management interface. Secret values are never returned after creation."
   },
   "servers": [{ "url": "https://api.example.com/admin/api/v1" }],
@@ -88,6 +88,44 @@
         }
       }
     },
+    "/settings/admin-origins": {
+      "get": {
+        "summary": "List persistent management HTTPS origins",
+        "operationId": "listAdminOrigins",
+        "responses": {
+          "200": { "description": "Origin policy mode and configured origins", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AdminOriginsResponse" } } } },
+          "401": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "post": {
+        "summary": "Add and immediately activate a management HTTPS origin",
+        "operationId": "addAdminOrigin",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["origin"], "properties": { "origin": { "type": "string", "format": "uri", "examples": ["https://admin.example.com"] } } } } } },
+        "responses": {
+          "201": { "description": "Origin persisted and activated without invalidating existing sessions", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AdminOrigin" } } }, "headers": { "X-MT-State-Warning": { "$ref": "#/components/headers/StateWarning" } } },
+          "400": { "$ref": "#/components/responses/Error" },
+          "401": { "$ref": "#/components/responses/Error" },
+          "403": { "$ref": "#/components/responses/Error" },
+          "409": { "$ref": "#/components/responses/Error" },
+          "500": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/settings/admin-origins/{id}": {
+      "delete": {
+        "summary": "Remove a management origin and invalidate all administrator sessions",
+        "operationId": "removeAdminOrigin",
+        "parameters": [{ "in": "path", "name": "id", "required": true, "schema": { "type": "string", "minLength": 43, "maxLength": 43 } }],
+        "responses": {
+          "204": { "description": "Origin removed and all sessions invalidated", "headers": { "X-MT-State-Warning": { "$ref": "#/components/headers/StateWarning" } } },
+          "401": { "$ref": "#/components/responses/Error" },
+          "403": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" },
+          "409": { "$ref": "#/components/responses/Error" },
+          "500": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
     "/device-tokens": {
       "get": { "summary": "List device tokens", "operationId": "listDeviceTokens", "responses": { "200": { "description": "Named token metadata without hashes or raw values" } } },
       "post": {
@@ -128,12 +166,13 @@
     "schemas": {
       "StatusResponse": {
         "type": "object",
-        "required": ["configured", "status", "version", "secure_transport", "state_durability", "csrf_token"],
+        "required": ["configured", "status", "version", "secure_transport", "admin_origin_mode", "state_durability", "csrf_token"],
         "properties": {
           "configured": { "type": "boolean" },
           "status": { "type": "string", "enum": ["setup_required", "ready", "unavailable"] },
           "version": { "type": "string" },
           "secure_transport": { "type": "boolean" },
+          "admin_origin_mode": { "type": "string", "enum": ["proxy_allowlist", "direct_same_origin"] },
           "state_durability": { "type": "string", "enum": ["not_applicable", "confirmed", "unconfirmed"] },
           "csrf_token": { "type": "string" }
         }
@@ -165,10 +204,28 @@
       "SetupRequest": {
 		"type": "object",
 		"required": ["password", "qweather", "device_name"],
-        "properties": {
-          "password": { "type": "string", "description": "At least 12 Unicode code points and at most 128 UTF-8 bytes.", "minLength": 12, "maxLength": 128 },
+		"properties": {
+		  "password": { "type": "string", "description": "At least 12 Unicode code points and at most 128 UTF-8 bytes.", "minLength": 12, "maxLength": 128 },
 		  "qweather": { "$ref": "#/components/schemas/QWeatherInput" },
-          "device_name": { "type": "string", "minLength": 1, "maxLength": 64 }
+		  "device_name": { "type": "string", "minLength": 1, "maxLength": 64 },
+		  "admin_origins": { "type": "array", "maxItems": 16, "uniqueItems": true, "description": "Persistent HTTPS origins. Proxy mode requires the current request Origin to be included.", "items": { "type": "string", "format": "uri", "examples": ["https://admin.example.com"] } }
+        }
+      },
+      "AdminOrigin": {
+        "type": "object",
+        "required": ["id", "origin"],
+        "properties": {
+          "id": { "type": "string", "description": "Base64URL-encoded SHA-256 of the canonical origin", "minLength": 43, "maxLength": 43 },
+          "origin": { "type": "string", "format": "uri", "examples": ["https://admin.example.com"] }
+        }
+      },
+      "AdminOriginsResponse": {
+        "type": "object",
+        "required": ["mode", "maximum", "origins"],
+        "properties": {
+          "mode": { "type": "string", "enum": ["proxy_allowlist", "direct_same_origin"] },
+          "maximum": { "type": "integer", "const": 16 },
+          "origins": { "type": "array", "maxItems": 16, "items": { "$ref": "#/components/schemas/AdminOrigin" } }
         }
       },
       "Verification": {
@@ -223,7 +280,7 @@
       "LoginRequest": { "type": "object", "required": ["password"], "properties": { "password": { "type": "string" } } },
       "ErrorResponse": {
         "type": "object", "required": ["error"],
-        "properties": { "error": { "type": "object", "required": ["code", "message"], "properties": { "code": { "type": "string", "description": "Stable error code. Origin and CSRF failures are reported separately as origin_rejected and csrf_rejected; QWeather test concurrency uses qweather_test_busy and qweather_test_rate_limited.", "examples": ["origin_rejected", "csrf_rejected", "qweather_test_busy", "qweather_test_rate_limited"] }, "message": { "type": "string" }, "request_id": { "type": "string" } } } }
+        "properties": { "error": { "type": "object", "required": ["code", "message"], "properties": { "code": { "type": "string", "description": "Stable error code. Origin management uses invalid_admin_origin, admin_origin_exists, admin_origin_limit_reached, admin_origin_not_found, current_admin_origin, and last_admin_origin.", "examples": ["origin_rejected", "csrf_rejected", "current_admin_origin", "qweather_test_busy"] }, "message": { "type": "string" }, "request_id": { "type": "string" } } } }
       }
     }
   }

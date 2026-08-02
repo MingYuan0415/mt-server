@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/MingYuan0415/mt-server/internal/modules/admin"
@@ -25,6 +26,7 @@ type App struct {
 	server  *http.Server
 	modules []platform.Module
 	logger  *slog.Logger
+	lock    *state.Lock
 }
 
 // New opens persistent state and composes all enabled modules.
@@ -33,9 +35,29 @@ func New(cfg config.Config, logger *slog.Logger, version string) (*App, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open application state: %w", err)
 	}
+	stateLock, err := store.AcquireLock()
+	if err != nil {
+		return nil, fmt.Errorf("acquire application state lock: %w", err)
+	}
+	keepLock := false
+	defer func() {
+		if !keepLock {
+			_ = stateLock.Close()
+		}
+	}()
+	transport := adminauth.NewTransportPolicy(
+		cfg.AdminAllowInsecureHTTP, cfg.AdminBehindHTTPSProxy)
 	runtime := NewRuntimeManager(logger)
 	persisted, err := store.Load()
 	if err == nil {
+		origins, validateErr := transport.ValidatePublicOrigins(persisted.Admin.PublicOrigins)
+		if validateErr != nil || !slices.Equal(origins, persisted.Admin.PublicOrigins) {
+			if validateErr == nil {
+				validateErr = errors.New("origins are not stored in canonical form")
+			}
+			return nil, fmt.Errorf("validate management origins: %w", validateErr)
+		}
+		transport.ReplacePublicOrigins(origins)
 		if err := runtime.Apply(persisted); err != nil {
 			return nil, fmt.Errorf("activate application state: %w", err)
 		}
@@ -53,8 +75,7 @@ func New(cfg config.Config, logger *slog.Logger, version string) (*App, error) {
 		store,
 		runtime,
 		adminauth.NewSessions(),
-		adminauth.NewTransportPolicy(cfg.AdminAllowInsecureHTTP, cfg.AdminBehindHTTPSProxy,
-			cfg.AdminPublicOrigins...),
+		transport,
 		logger,
 		version,
 	)
@@ -70,6 +91,7 @@ func New(cfg config.Config, logger *slog.Logger, version string) (*App, error) {
 		httpapi.WriteError(w, r, http.StatusNotFound, "not_found", "resource not found")
 	})
 
+	keepLock = true
 	return &App{
 		server: &http.Server{
 			Addr:              cfg.ListenAddr,
@@ -82,11 +104,17 @@ func New(cfg config.Config, logger *slog.Logger, version string) (*App, error) {
 		},
 		modules: modules,
 		logger:  logger,
+		lock:    stateLock,
 	}, nil
 }
 
 // Run starts all modules and serves until cancellation or listener failure.
 func (a *App) Run(ctx context.Context) error {
+	defer func() {
+		if err := a.lock.Close(); err != nil {
+			a.logger.Error("release state lock failed", "error", err)
+		}
+	}()
 	started := make([]platform.Module, 0, len(a.modules))
 	for _, module := range a.modules {
 		if err := module.Start(ctx); err != nil {

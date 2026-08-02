@@ -14,7 +14,7 @@
 - 按位置网格隔离 LRU 内存缓存，支持并发刷新合并和陈旧数据降级。
 - 按鉴权主体限制短时间位置跳变，保护上游配额。
 - 使用 Argon2id 管理员密码、内存 session、同源校验、CSRF 和全局登录限速。
-- 支持显式 HTTPS 管理 Origin 白名单，适配 Caddy、Cloudflare Tunnel 和其他反向代理。
+- 通过初始化和管理网页维护 HTTPS Origin 白名单，新增入口无需重启容器。
 - 提供版本化状态、可报告持久性结果的原子写入、健康检查和结构化访问日志。
 - 提供 scratch、非 root、只读根文件系统的多架构容器镜像。
 
@@ -45,11 +45,12 @@ MT_PUBLIC_HOST=api.example.com docker compose -f deploy/compose.https.yaml up -d
 首次打开 `/admin/` 时需要配置：
 
 - 至少 12 个 Unicode 字符且 UTF-8 编码不超过 128 字节的管理员密码。
+- 当前及备用管理 HTTPS Origin；代理模式会自动加入当前入口。
 - QWeather 账户专属 API Host、Project ID、Credential ID 和 Ed25519 PKCS#8 私钥。
 - 仅用于本次 QWeather 实时验证的临时坐标。
 - 首个设备名称。
 
-验证成功后，服务原子创建 `state.json`、热加载天气运行时，并仅显示一次首个设备令牌。后续可在管理界面测试或更新 QWeather、修改管理员密码，以及创建和撤销设备令牌。私钥保存后只返回公钥指纹。
+验证成功后，服务原子创建 `state.json`、热加载天气运行时，并仅显示一次首个设备令牌。后续可在管理界面增删管理域名、测试或更新 QWeather、修改管理员密码，以及创建和撤销设备令牌。私钥保存后只返回公钥指纹。
 
 未初始化时 `/health/live` 返回 `200`，`/health/ready` 返回 `503 setup_required`，天气接口返回 `503 service_unconfigured`。未初始化实例没有管理员身份边界，应先在受限网络中完成配置。
 
@@ -88,11 +89,10 @@ curl https://api.example.com/api/v1/weather/current \
 | `MT_STATE_DIR` | `/var/lib/mt-server` | 必须为绝对路径的可写状态目录 |
 | `MT_ADMIN_ALLOW_INSECURE_HTTP` | `false` | 仅在受信 LAN 中允许 HTTP 管理写操作 |
 | `MT_ADMIN_BEHIND_HTTPS_PROXY` | `false` | 明确声明管理入口始终由受信 HTTPS 代理提供 |
-| `MT_ADMIN_PUBLIC_ORIGINS` | 空 | 最多 16 个逗号分隔的完整 HTTPS Origin；代理部署时用于管理同源校验 |
 
-设置 `MT_ADMIN_PUBLIC_ORIGINS` 时必须同时启用 HTTPS 代理模式并保持 `MT_ADMIN_ALLOW_INSECURE_HTTP=false`。服务直接匹配浏览器 `Origin`，不信任 `Forwarded`、`X-Forwarded-Host` 或 `X-Forwarded-Proto`，因此代理内部使用什么 `Host` 不影响登录。代理必须覆盖客户端同名头并确保源站只允许代理访问。
+两个管理传输开关不能同时启用。HTTPS 代理模式的域名列表保存在私有状态中，由初始化页和“管理域名”页面维护；服务直接匹配浏览器 `Origin`，不信任 `Forwarded`、`X-Forwarded-Host` 或 `X-Forwarded-Proto`。代理必须确保源站只允许代理访问。
 
-QWeather 私钥、管理员密码验证器、缓存策略和设备令牌哈希保存在状态卷中。请求位置只用于单次请求、网格限速和内存缓存键，不写入持久状态。
+QWeather 私钥、管理员密码验证器、管理域名、缓存策略和设备令牌哈希保存在状态卷中。请求位置只用于单次请求、网格限速和内存缓存键，不写入持久状态。
 
 ## 开发与验证
 

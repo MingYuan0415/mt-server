@@ -1,4 +1,4 @@
-const appState = { csrf: "", publicCSRF: "", status: null };
+const appState = { csrf: "", publicCSRF: "", status: null, setupOrigins: [] };
 const views = ["setup-view", "login-view", "dashboard-view"];
 const errorMessages = {
   qweather_credentials_rejected: "QWeather 凭据被拒绝，请核对 Project ID、Credential ID、API Host 和私钥是否属于同一项目。",
@@ -10,7 +10,13 @@ const errorMessages = {
   origin_rejected: "管理请求来源未被允许，请使用配置的公开 HTTPS 域名访问。",
   csrf_rejected: "管理会话已过期，请刷新页面后重新登录。",
   qweather_test_busy: "已有一个 QWeather 连接测试正在进行，请稍后重试。",
-  qweather_test_rate_limited: "QWeather 连接测试次数已达上限，请稍后重试。"
+  qweather_test_rate_limited: "QWeather 连接测试次数已达上限，请稍后重试。",
+  invalid_admin_origin: "请输入完整、有效的 HTTPS Origin。",
+  admin_origin_exists: "该管理域名已存在。",
+  admin_origin_limit_reached: "管理域名数量已达到上限。",
+  admin_origin_not_found: "该管理域名已不存在，请刷新页面。",
+  current_admin_origin: "不能删除当前正在使用的管理域名。",
+  last_admin_origin: "HTTPS 代理模式必须保留至少一个管理域名。"
 };
 
 function showView(id) {
@@ -169,10 +175,71 @@ function validatePassword(value) {
   return "";
 }
 
+function normalizeAdminOrigin(value) {
+  let parsed;
+  try { parsed = new URL(value.trim()); } catch { throw new Error("请输入完整、有效的 HTTPS Origin"); }
+  if (parsed.protocol !== "https:" || parsed.username || parsed.password ||
+      parsed.pathname !== "/" || parsed.search || parsed.hash) {
+    throw new Error("请输入完整、有效的 HTTPS Origin");
+  }
+  return parsed.origin;
+}
+
+function renderSetupOrigins() {
+  const list = document.getElementById("setup-origin-list");
+  list.replaceChildren();
+  const current = window.location.protocol === "https:" ? window.location.origin : "";
+  for (const origin of appState.setupOrigins) {
+    const item = document.createElement("div");
+    item.className = "origin-item";
+    const value = document.createElement("code");
+    value.textContent = origin;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "danger";
+    button.textContent = "删除";
+    const currentProxyOrigin = appState.status?.admin_origin_mode === "proxy_allowlist" && origin === current;
+    button.disabled = currentProxyOrigin;
+    if (currentProxyOrigin) button.title = "当前管理域名不能删除";
+    button.addEventListener("click", () => {
+      appState.setupOrigins = appState.setupOrigins.filter(itemOrigin => itemOrigin !== origin);
+      renderSetupOrigins();
+    });
+    item.append(value, button);
+    list.append(item);
+  }
+}
+
+function addSetupOrigin() {
+  showMessage("setup-origin-message", "");
+  const input = document.getElementById("setup-origin-input");
+  try {
+    const origin = normalizeAdminOrigin(input.value);
+    if (appState.setupOrigins.includes(origin)) throw new Error("该管理域名已存在");
+    if (appState.setupOrigins.length >= 16) throw new Error("管理域名数量已达到上限");
+    appState.setupOrigins.push(origin);
+    input.value = "";
+    renderSetupOrigins();
+  } catch (error) { showMessage("setup-origin-message", error.message, "error"); }
+}
+
+function configureSetupOrigins(status) {
+  const proxyMode = status.admin_origin_mode === "proxy_allowlist";
+  document.getElementById("setup-origin-mode").textContent = proxyMode
+    ? "当前 HTTPS 域名会作为管理入口保存。"
+    : "可预先保存未来 HTTPS 代理使用的管理域名。";
+  if (!status.configured && proxyMode && window.location.protocol === "https:" &&
+      !appState.setupOrigins.includes(window.location.origin)) {
+    appState.setupOrigins.unshift(window.location.origin);
+  }
+  renderSetupOrigins();
+}
+
 async function refreshStatus() {
   const status = await api("/status");
   appState.status = status;
   appState.publicCSRF = status.csrf_token;
+  configureSetupOrigins(status);
   const statusNode = document.getElementById("service-status");
   statusNode.textContent = status.status === "ready" ? "服务正常" : status.status === "setup_required" ? "等待初始化" : "服务不可用";
   document.getElementById("overview-ready").textContent = statusNode.textContent;
@@ -186,7 +253,7 @@ async function loadDashboard() {
   const session = await api("/session");
   appState.csrf = session.csrf_token;
   showView("dashboard-view");
-  await Promise.all([loadQWeather(), loadTokens(), refreshStatus()]);
+  await Promise.all([loadQWeather(), loadAdminOrigins(), loadTokens(), refreshStatus()]);
 }
 
 async function loadQWeather() {
@@ -199,6 +266,47 @@ async function loadQWeather() {
   form.elements.private_key_file.value = "";
   document.getElementById("key-state").textContent = value.private_key_configured ? "已配置" : "未配置";
   document.getElementById("key-fingerprint").textContent = value.public_key_fingerprint || "-";
+}
+
+async function loadAdminOrigins() {
+  const value = await api("/settings/admin-origins");
+  const list = document.getElementById("origin-list");
+  list.replaceChildren();
+  document.getElementById("origin-mode").textContent = value.mode === "proxy_allowlist"
+    ? "列表中的 HTTPS Origin 当前用于管理同源校验。"
+    : "当前使用直接同源校验；这些域名会在切换到 HTTPS 代理模式后生效。";
+  const current = window.location.protocol === "https:" ? window.location.origin : "";
+  for (const entry of value.origins) {
+    const item = document.createElement("div");
+    item.className = "origin-item";
+    const description = document.createElement("div");
+    const origin = document.createElement("code");
+    origin.textContent = entry.origin;
+    description.append(origin);
+    if (entry.origin === current) {
+      const marker = document.createElement("small");
+      marker.textContent = "当前入口";
+      description.append(marker);
+    }
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "danger";
+    button.textContent = "删除";
+    button.disabled = entry.origin === current;
+    if (button.disabled) button.title = "当前管理域名不能删除";
+    button.addEventListener("click", async () => {
+      if (!confirm(`删除管理域名“${entry.origin}”？`)) return;
+      showMessage("origin-message", "");
+      try {
+        await api(`/settings/admin-origins/${encodeURIComponent(entry.id)}`, { method: "DELETE" });
+        appState.csrf = "";
+        showView("login-view");
+        showMessage("login-message", "管理域名已删除，请重新登录", "success");
+      } catch (error) { showMessage("origin-message", error.message, "error"); }
+    });
+    item.append(description, button);
+    list.append(item);
+  }
 }
 
 async function loadTokens() {
@@ -241,6 +349,10 @@ document.getElementById("setup-form").addEventListener("submit", async event => 
   }
   const passwordError = validatePassword(form.elements.password.value);
   if (passwordError) { showMessage("setup-message", passwordError, "error"); return; }
+  if (appState.status?.admin_origin_mode === "proxy_allowlist" &&
+      !appState.setupOrigins.includes(window.location.origin)) {
+    showMessage("setup-message", "管理域名列表必须包含当前 HTTPS Origin", "error"); return;
+  }
   setBusy(form, true);
   try {
     const privateKey = await privateKeyFromForm(form, true);
@@ -255,7 +367,8 @@ document.getElementById("setup-form").addEventListener("submit", async event => 
           private_key_pem: privateKey,
           test_location: temporaryTestLocation(form)
         },
-        device_name: form.elements.device_name.value.trim()
+        device_name: form.elements.device_name.value.trim(),
+        admin_origins: [...appState.setupOrigins]
       }
     });
     appState.csrf = response.csrf_token;
@@ -265,7 +378,7 @@ document.getElementById("setup-form").addEventListener("submit", async event => 
     try { await loadDashboard(); }
     catch (error) { showMessage("setup-message", `初始化已完成，但仪表盘刷新失败：${error.message}`, "error"); }
   } catch (error) { showMessage("setup-message", error.message, "error"); }
-  finally { setBusy(form, false); }
+  finally { setBusy(form, false); renderSetupOrigins(); }
 });
 
 document.getElementById("login-form").addEventListener("submit", async event => {
@@ -286,6 +399,10 @@ for (const tab of document.querySelectorAll(".tab")) tab.addEventListener("click
 });
 
 document.getElementById("setup-test-browser-location").addEventListener("click", () => useBrowserLocation(document.getElementById("setup-form"), "setup-message"));
+document.getElementById("setup-origin-add").addEventListener("click", addSetupOrigin);
+document.getElementById("setup-origin-input").addEventListener("keydown", event => {
+  if (event.key === "Enter") { event.preventDefault(); addSetupOrigin(); }
+});
 document.getElementById("qweather-test-browser-location").addEventListener("click", () => useBrowserLocation(document.getElementById("qweather-form"), "qweather-message"));
 
 async function qweatherPayload(form) {
@@ -327,6 +444,22 @@ document.getElementById("token-form").addEventListener("submit", async event => 
     catch { showMessage("token-message", "令牌已创建并显示，但页面刷新失败，请手动刷新。", "warning"); }
   }
   catch (error) { showMessage("token-message", error.message, "error"); }
+  finally { setBusy(form, false); }
+});
+
+document.getElementById("origin-form").addEventListener("submit", async event => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  setBusy(form, true);
+  showMessage("origin-message", "");
+  try {
+    const origin = normalizeAdminOrigin(form.elements.origin.value);
+    await api("/settings/admin-origins", { method: "POST", body: { origin } });
+    form.reset();
+    showMessage("origin-message", "管理域名已添加并生效", "success");
+    try { await loadAdminOrigins(); }
+    catch { showMessage("origin-message", "管理域名已添加，但列表刷新失败，请手动刷新。", "warning"); }
+  } catch (error) { showMessage("origin-message", error.message, "error"); }
   finally { setBusy(form, false); }
 });
 

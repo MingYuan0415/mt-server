@@ -2,10 +2,22 @@ package main
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"errors"
 	"log/slog"
+	"math/big"
+	"net"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -86,7 +98,7 @@ func main() {
 		os.Exit(1)
 	}
 	management, err := admin.New(store, &runtime{}, adminauth.NewSessions(),
-		adminauth.NewTransportPolicy(true, false), logger, "web-test")
+		adminauth.NewTransportPolicy(false, true), logger, "web-test")
 	if err != nil {
 		logger.Error("create management handler", "error", err)
 		os.Exit(1)
@@ -96,14 +108,88 @@ func main() {
 	mux.HandleFunc("/", func(w http.ResponseWriter, request *http.Request) {
 		httpapi.WriteError(w, request, http.StatusNotFound, "not_found", "resource not found")
 	})
-	server := &http.Server{
+	backend := &http.Server{
 		Addr:              "127.0.0.1:18080",
 		Handler:           httpapi.RequestContext(logger, mux),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
+	target, _ := url.Parse("http://127.0.0.1:18080")
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	director := proxy.Director
+	proxy.Director = func(request *http.Request) {
+		director(request)
+		request.Host = "mt-server:8080"
+	}
+	frontend := &http.Server{
+		Addr:              "127.0.0.1:18443",
+		Handler:           proxy,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	backendListener, err := net.Listen("tcp", backend.Addr)
+	if err != nil {
+		logger.Error("listen backend", "error", err)
+		os.Exit(1)
+	}
+	certificate, err := testCertificate(os.Getenv("MT_STATE_DIR"))
+	if err != nil {
+		logger.Error("create test certificate", "error", err)
+		os.Exit(1)
+	}
+	frontendListener, err := tls.Listen("tcp", frontend.Addr, &tls.Config{
+		Certificates: []tls.Certificate{certificate}, MinVersion: tls.VersionTLS12,
+	})
+	if err != nil {
+		logger.Error("listen frontend", "error", err)
+		os.Exit(1)
+	}
+	go func() {
+		if err := frontend.Serve(frontendListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Error("serve frontend", "error", err)
+			os.Exit(1)
+		}
+	}()
 	logger.Info("server listening")
-	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	if err := backend.Serve(backendListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		logger.Error("serve", "error", err)
 		os.Exit(1)
 	}
+}
+
+func testCertificate(directory string) (tls.Certificate, error) {
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 120))
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	now := time.Now()
+	template := x509.Certificate{
+		SerialNumber: serial, Subject: pkix.Name{CommonName: "admin.example.test"},
+		NotBefore: now.Add(-time.Minute), NotAfter: now.Add(time.Hour),
+		KeyUsage:    x509.KeyUsageDigitalSignature,
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		DNSNames:    []string{"admin.example.test", "new.example.test"},
+	}
+	certificateDER, err := x509.CreateCertificate(rand.Reader, &template, &template,
+		&privateKey.PublicKey, privateKey)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	privateDER, err := x509.MarshalPKCS8PrivateKey(privateKey)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	certificatePath := filepath.Join(directory, "test-cert.pem")
+	privatePath := filepath.Join(directory, "test-key.pem")
+	if err := os.WriteFile(certificatePath,
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificateDER}), 0o600); err != nil {
+		return tls.Certificate{}, err
+	}
+	if err := os.WriteFile(privatePath,
+		pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privateDER}), 0o600); err != nil {
+		return tls.Certificate{}, err
+	}
+	return tls.LoadX509KeyPair(certificatePath, privatePath)
 }
