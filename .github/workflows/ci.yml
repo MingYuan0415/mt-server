@@ -96,7 +96,7 @@ jobs:
             -e MT_ADMIN_ALLOW_INSECURE_HTTP=true \
             --mount "type=volume,source=$volume,target=/var/lib/mt-server" \
             mt-server:ci
-          for attempt in $(seq 1 20); do
+          for _ in $(seq 1 20); do
             if curl --fail --silent http://127.0.0.1:18080/health/live >/dev/null; then
               break
             fi
@@ -112,7 +112,10 @@ jobs:
           grep -q service_unconfigured device.json
           test "$(docker inspect --format '{{.Config.User}}' mt-server-smoke)" = "65532:65532"
           test "$(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' mt-server-smoke)" = "true"
-          ! docker exec mt-server-smoke /mt-server setup-token
+          if docker exec mt-server-smoke /mt-server setup-token; then
+            echo "removed setup-token command unexpectedly succeeded" >&2
+            exit 1
+          fi
           status="$(curl --fail --silent http://127.0.0.1:18080/admin/api/v1/status)"
           csrf="$(printf '%s' "$status" | sed -n 's/.*"csrf_token":"\([^"]*\)".*/\1/p')"
           test -n "$csrf"
