@@ -1,9 +1,9 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "mt-server device API",
+    "title": "mt-server weather API",
     "version": "1.0.0",
-    "description": "Versioned device backend API. Weather data is provided by QWeather."
+    "description": "Versioned authenticated weather API implemented by mt-server. Weather data is provided by QWeather."
   },
   "servers": [
     { "url": "https://api.example.com" }
@@ -141,17 +141,17 @@
     "parameters": {
       "LocationLatitude": {
         "name": "X-MT-Location-Latitude", "in": "header", "required": true,
-        "description": "Device-obtained decimal latitude; normalized by the server to a 0.1 degree grid.",
+        "description": "Request latitude; validated and normalized by the server to a 0.1 degree grid.",
         "schema": { "type": "string", "maxLength": 32 }
       },
       "LocationLongitude": {
         "name": "X-MT-Location-Longitude", "in": "header", "required": true,
-        "description": "Device-obtained decimal longitude; normalized by the server to a 0.1 degree grid.",
+        "description": "Request longitude; validated and normalized by the server to a 0.1 degree grid.",
         "schema": { "type": "string", "maxLength": 32 }
       },
       "LocationProvider": {
         "name": "X-MT-Location-Provider", "in": "header", "required": true,
-        "description": "Lowercase identifier for the device-side location provider.",
+        "description": "Lowercase identifier declaring the source of the request location.",
         "schema": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,31}$" }
       },
       "LocationCity": {
@@ -202,7 +202,7 @@
     },
     "examples": {
       "CurrentWeatherResponse": {
-        "summary": "Current weather for a device-supplied coarse location",
+        "summary": "Current weather for a request-supplied coarse location",
         "value": {
           "schema_version": 1,
           "source": {
@@ -216,7 +216,7 @@
             "country": "EX",
             "timezone": "Etc/UTC",
             "source": "device",
-            "provider": "ipinfo",
+            "provider": "example",
             "precision": "city"
           },
           "fetched_at": "2026-08-02T02:00:00Z",
@@ -255,7 +255,7 @@
             "city": "Example City",
             "country": "EX",
             "source": "device",
-            "provider": "ipinfo",
+            "provider": "example",
             "precision": "city"
           },
           "fetched_at": "2026-08-02T02:00:00Z",
@@ -295,7 +295,7 @@
             "city": "Example City",
             "country": "EX",
             "source": "device",
-            "provider": "ipinfo",
+            "provider": "example",
             "precision": "city"
           },
           "fetched_at": "2026-08-02T02:00:00Z",

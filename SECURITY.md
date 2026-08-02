@@ -18,7 +18,7 @@ The server intentionally does not log client IPs, geolocation coordinates, Autho
 
 The LAN Compose template permits management credentials over HTTP and is only suitable for a trusted, firewalled network. Any public or untrusted-network deployment must use HTTPS and set `MT_ADMIN_ALLOW_INSECURE_HTTP=false`.
 
-Authenticated devices provide their own coarse location on every weather request. The server validates and rounds coordinates, never returns or logs them, and limits rapid grid changes per DeviceID. Possession of a device token still permits choosing arbitrary coordinates and consuming weather quota, so tokens must be independently named, protected, rotated, and revoked when lost. Devices must not forward the public IP, full location-provider response, or provider credential.
+Authenticated weather requests include a declared coarse location. The server accepts only the fixed location-header contract, validates and rounds coordinates, never returns or logs them, and limits rapid grid changes per DeviceID. Possession of a device token still permits choosing arbitrary coordinates and consuming weather quota, so tokens must be independently named, protected, rotated, and revoked when lost.
 
 When TLS terminates at a reverse proxy, `MT_ADMIN_BEHIND_HTTPS_PROXY=true` unconditionally marks the browser-facing management transport as HTTPS. Set it only when the origin is reachable exclusively through the intended HTTPS proxy; the server intentionally ignores `X-Forwarded-Proto`.
 

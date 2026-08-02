@@ -71,7 +71,7 @@ func TestOpenAPIContract(t *testing.T) {
 	}
 	for _, required := range []string{
 		`"id":"qweather"`, `"name":"QWeather"`, "https://www.qweather.com/",
-		`"source":"device"`, `"provider":"ipinfo"`,
+		`"source":"device"`, `"provider":"example"`,
 	} {
 		if !strings.Contains(string(exampleJSON), required) {
 			t.Errorf("OpenAPI examples are missing %q", required)
