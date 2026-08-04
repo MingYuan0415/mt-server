@@ -48,8 +48,9 @@ func New(cfg config.Config, logger *slog.Logger, version string) (*App, error) {
 	transport := adminauth.NewTransportPolicy(
 		cfg.AdminAllowInsecureHTTP, cfg.AdminBehindHTTPSProxy)
 	runtime := NewRuntimeManager(logger)
-	persisted, err := store.Load()
+	loaded, err := store.LoadCompatible()
 	if err == nil {
+		persisted := loaded.State
 		origins, validateErr := transport.ValidatePublicOrigins(persisted.Admin.PublicOrigins)
 		if validateErr != nil || !slices.Equal(origins, persisted.Admin.PublicOrigins) {
 			if validateErr == nil {
@@ -57,10 +58,18 @@ func New(cfg config.Config, logger *slog.Logger, version string) (*App, error) {
 			}
 			return nil, fmt.Errorf("validate management origins: %w", validateErr)
 		}
-		transport.ReplacePublicOrigins(origins)
-		if err := runtime.Apply(persisted); err != nil {
-			return nil, fmt.Errorf("activate application state: %w", err)
+		prepared, prepareErr := runtime.Prepare(persisted)
+		if prepareErr != nil {
+			return nil, fmt.Errorf("prepare application state: %w", prepareErr)
 		}
+		defer prepared.Discard()
+		if loaded.SourceVersion != state.SchemaVersion {
+			if migrateErr := commitStateMigration(store, loaded, logger); migrateErr != nil {
+				return nil, fmt.Errorf("migrate application state: %w", migrateErr)
+			}
+		}
+		transport.ReplacePublicOrigins(origins)
+		prepared.Activate()
 	} else if !errors.Is(err, state.ErrNotInitialized) {
 		return nil, err
 	}
@@ -106,6 +115,20 @@ func New(cfg config.Config, logger *slog.Logger, version string) (*App, error) {
 		logger:  logger,
 		lock:    stateLock,
 	}, nil
+}
+
+func commitStateMigration(store *state.Store, loaded state.CompatibleState, logger *slog.Logger) error {
+	result, err := store.CommitMigration(loaded)
+	if err != nil {
+		return err
+	}
+	if !result.DurabilityConfirmed {
+		logger.Error("application state migration durability could not be confirmed",
+			"category", "state_directory_sync", "error", result.DurabilityWarning)
+	}
+	logger.Info("application state migrated", "from_schema", loaded.SourceVersion,
+		"to_schema", state.SchemaVersion)
+	return nil
 }
 
 // Run starts all modules and serves until cancellation or listener failure.

@@ -35,6 +35,8 @@ async function installBackend(page, initialConfigured) {
     stateDurability: initialConfigured ? "confirmed" : "not_applicable",
     warnNextWrite: false,
     failNextSessionLoad: false,
+    failDiagnostics: false,
+    diagnosticsRequests: 0,
     writes: []
   };
 
@@ -108,6 +110,26 @@ async function installBackend(page, initialConfigured) {
     if (path === "/session" && method === "DELETE") {
       backend.loggedIn = false;
       return json(200, { status: "logged_out" });
+    }
+    if (path === "/diagnostics" && method === "GET") {
+      backend.diagnosticsRequests++;
+      if (backend.failDiagnostics) {
+        return json(503, { error: { code: "diagnostics_unavailable", message: "unavailable" } });
+      }
+      return json(200, {
+        generated_at: "2026-08-02T02:00:00Z",
+        runtime_started_at: "2026-08-02T01:00:00Z",
+        provider: { status: "ready" },
+        last_success_at: "2026-08-02T01:55:00Z",
+        locations: 1,
+        entries: 4,
+        kinds: {
+          current: { entries: 1, requests: 3, fresh_hits: 2, stale_hits: 0, fetch_successes: 1, fetch_failures: 0 },
+          hourly: { entries: 1, requests: 1, fresh_hits: 0, stale_hits: 0, fetch_successes: 1, fetch_failures: 0 },
+          daily: { entries: 1, requests: 1, fresh_hits: 0, stale_hits: 0, fetch_successes: 1, fetch_failures: 0 },
+          alerts: { entries: 1, requests: 1, fresh_hits: 0, stale_hits: 0, fetch_successes: 1, fetch_failures: 0 }
+        }
+      });
     }
     if (path === "/settings/qweather" && method === "GET") return json(200, backend.qweather);
     if (path === "/settings/qweather/test" && method === "POST") {
@@ -226,6 +248,8 @@ test("@desktop completes setup and rotates configuration", async ({ page }, test
   await expect(page.locator("#overview-verification")).toContainText("浏览器临时位置");
   await expect(page.locator("#overview-verification")).not.toContainText("Asia/Shanghai");
   await expect(page.locator("#overview-verification")).toContainText("28 °C");
+  await expect(page.locator("#diagnostics-provider")).toHaveText("正常");
+  await expect(page.locator("#diagnostics-kinds")).toContainText("天气预警");
   await expectStableLayout(page);
   await page.screenshot({ path: testInfo.outputPath("desktop-verification.png"), fullPage: true });
 
@@ -257,12 +281,14 @@ test("@desktop completes setup and rotates configuration", async ({ page }, test
 
 test("@mobile logs in and keeps the settings layout usable", async ({ page }, testInfo) => {
   const backend = await installBackend(page, true);
+  backend.failDiagnostics = true;
   backend.origins = [{ id: "origin-current", origin: "https://admin.example.test:18443" }];
   await page.goto("/admin/");
   await expect(page.getByRole("heading", { name: "mt-server" })).toBeVisible();
   await page.locator('#login-form [name="password"]').fill("correct horse battery staple");
   await page.getByRole("button", { name: "登录" }).click();
   await expect(page.locator("#dashboard-view")).toBeVisible();
+  await expect(page.locator("#diagnostics-message")).toContainText("运行诊断暂时不可用");
   expect(backend.writes[0]).toMatchObject({ path: "/session", csrf: backend.publicCSRF });
 
   await page.getByRole("button", { name: "管理域名" }).click();
@@ -275,6 +301,40 @@ test("@mobile logs in and keeps the settings layout usable", async ({ page }, te
   await expectStableLayout(page);
   await expectNoBrowserStorage(page);
   await page.screenshot({ path: testInfo.outputPath("mobile-qweather.png"), fullPage: true });
+});
+
+test("@mobile renders and scrolls diagnostics without viewport overflow", async ({ page }, testInfo) => {
+  const backend = await installBackend(page, true);
+  await page.goto("/admin/");
+  await page.locator('#login-form [name="password"]').fill("correct horse battery staple");
+  await page.getByRole("button", { name: "登录" }).click();
+  await expect(page.locator("#dashboard-view")).toBeVisible();
+  await expect(page.locator("#diagnostics-provider")).toHaveText("正常");
+  await expect(page.locator("#diagnostics-kinds")).toContainText("实时天气");
+  await expect(page.locator("#diagnostics-kinds")).toContainText("天气预警");
+  await expectStableLayout(page);
+
+  const table = page.locator(".diagnostics-table-wrap");
+  await expect.poll(async () => table.evaluate(node => node.scrollWidth > node.clientWidth)).toBe(true);
+  const scrollable = await table.evaluate(node => {
+    node.scrollLeft = 120;
+    return { scrollWidth: node.scrollWidth, clientWidth: node.clientWidth, scrollLeft: node.scrollLeft };
+  });
+  expect(scrollable.scrollWidth).toBeGreaterThan(scrollable.clientWidth);
+  expect(scrollable.scrollLeft).toBeGreaterThan(0);
+
+  const beforeRefresh = backend.diagnosticsRequests;
+  const refresh = page.locator("#refresh-diagnostics");
+  await refresh.click();
+  await expect(refresh).toBeEnabled();
+  await expect(page.locator("#diagnostics-message")).toContainText("诊断生成于");
+  await refresh.click();
+  await expect(refresh).toBeEnabled();
+  await expect(page.locator("#diagnostics-kinds")).toContainText("逐日");
+  expect(backend.diagnosticsRequests).toBeGreaterThanOrEqual(beforeRefresh + 2);
+  await expectStableLayout(page);
+  await expectNoBrowserStorage(page);
+  await page.screenshot({ path: testInfo.outputPath("mobile-diagnostics.png"), fullPage: true });
 });
 
 test("@desktop real management handler completes the lifecycle", async ({ page }) => {

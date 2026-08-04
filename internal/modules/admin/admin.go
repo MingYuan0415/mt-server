@@ -45,6 +45,7 @@ type Runtime interface {
 	Prepare(state.State) (platform.PreparedChange, error)
 	PrepareTokens([]state.DeviceToken) (platform.PreparedChange, error)
 	Ready() error
+	Diagnostics() (weather.Diagnostics, error)
 }
 
 // Handler owns management authentication and configuration workflows.
@@ -97,9 +98,20 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /admin/api/v1/settings/admin-origins", h.requireSession(h.addAdminOrigin, true))
 	mux.HandleFunc("DELETE /admin/api/v1/settings/admin-origins/{id}", h.requireSession(h.deleteAdminOrigin, true))
 	mux.HandleFunc("GET /admin/api/v1/device-tokens", h.requireSession(h.listTokens, false))
+	mux.HandleFunc("GET /admin/api/v1/diagnostics", h.requireSession(h.diagnostics, false))
 	mux.HandleFunc("POST /admin/api/v1/device-tokens", h.requireSession(h.createToken, true))
 	mux.HandleFunc("DELETE /admin/api/v1/device-tokens/{id}", h.requireSession(h.deleteToken, true))
 	mux.HandleFunc("PUT /admin/api/v1/account/password", h.requireSession(h.changePassword, true))
+}
+
+func (h *Handler) diagnostics(w http.ResponseWriter, r *http.Request) {
+	value, err := h.runtime.Diagnostics()
+	if err != nil {
+		httpapi.WriteError(w, r, http.StatusServiceUnavailable,
+			"diagnostics_unavailable", "runtime diagnostics are unavailable")
+		return
+	}
+	httpapi.WriteJSON(w, http.StatusOK, value)
 }
 
 type setupRequest struct {
@@ -278,6 +290,7 @@ func (h *Handler) setup(w http.ResponseWriter, r *http.Request) {
 		"device":                          publicToken(tokenState),
 		"qweather_public_key_fingerprint": fingerprint,
 		"verification":                    verification,
+		"tested_capabilities":             []string{"current", "alerts"},
 	})
 }
 
@@ -370,6 +383,7 @@ func (h *Handler) testQWeather(w http.ResponseWriter, r *http.Request) {
 	}
 	httpapi.WriteJSON(w, http.StatusOK, map[string]any{
 		"status": "ok", "public_key_fingerprint": fingerprint, "verification": verification,
+		"tested_capabilities": []string{"current", "alerts"},
 	})
 }
 
@@ -405,6 +419,7 @@ func (h *Handler) putQWeather(w http.ResponseWriter, r *http.Request) {
 	h.logger.Info("QWeather settings updated")
 	httpapi.WriteJSON(w, http.StatusOK, map[string]any{
 		"status": "saved", "public_key_fingerprint": fingerprint, "verification": verification,
+		"tested_capabilities": []string{"current", "alerts"},
 	})
 }
 

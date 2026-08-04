@@ -2,7 +2,7 @@ name: mt-server-lan
 
 services:
   mt-server:
-    image: ${MT_SERVER_IMAGE:-ghcr.io/mingyuan0415/mt-server:v0.2.0}
+    image: ${MT_SERVER_IMAGE:-ghcr.io/mingyuan0415/mt-server:v0.3.0}
     restart: unless-stopped
     read_only: true
     user: "65532:65532"

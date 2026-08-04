@@ -1,6 +1,7 @@
 package state
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -170,6 +171,145 @@ func TestStoreRejectsSchemaV2WithUpgradeGuidance(t *testing.T) {
 	}
 }
 
+func TestStoreMigratesV3AndRestoresBackup(t *testing.T) {
+	directory := t.TempDir()
+	store, err := NewStore(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := minimalStateV3(time.Date(2026, 8, 3, 1, 2, 3, 0, time.UTC))
+	writeV3State(t, directory, original)
+	loaded, err := store.LoadCompatible()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.SourceVersion != 3 || loaded.State.SchemaVersion != SchemaVersion ||
+		loaded.State.Cache.AlertsTTL != int64((10*time.Minute)/time.Second) ||
+		loaded.State.Cache.AlertsStaleMax != int64(time.Hour/time.Second) {
+		t.Fatalf("unexpected migration candidate %#v", loaded)
+	}
+	result, err := store.CommitMigration(loaded)
+	if err != nil || !result.DurabilityConfirmed {
+		t.Fatalf("migration failed: %#v %v", result, err)
+	}
+	current, err := store.Load()
+	if err != nil || current.SchemaVersion != SchemaVersion ||
+		current.QWeather.APIHost != original.QWeather.APIHost {
+		t.Fatalf("unexpected migrated state %#v %v", current, err)
+	}
+	backupPath := filepath.Join(directory, migrationBackupName)
+	info, err := os.Stat(backupPath)
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("unexpected migration backup %#v %v", info, err)
+	}
+	result, err = store.RestoreV3Backup()
+	if err != nil || !result.DurabilityConfirmed {
+		t.Fatalf("restore failed: %#v %v", result, err)
+	}
+	if _, err := store.Load(); err == nil || !strings.Contains(err.Error(), "version 3") {
+		t.Fatalf("restored v3 state was unexpectedly current: %v", err)
+	}
+	restored, err := store.LoadCompatible()
+	if err != nil || restored.SourceVersion != 3 ||
+		restored.State.QWeather.APIHost != original.QWeather.APIHost {
+		t.Fatalf("unexpected restored state %#v %v", restored, err)
+	}
+}
+
+func TestStoreMigrationFailurePreservesV3State(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		inject func(*Store)
+	}{
+		{name: "backup sync", inject: func(store *Store) {
+			store.syncDirectory = func(string) error { return errors.New("backup sync failed") }
+		}},
+		{name: "state rename", inject: func(store *Store) {
+			store.rename = func(oldPath, newPath string) error {
+				if filepath.Base(newPath) == "state.json" {
+					return errors.New("state rename failed")
+				}
+				return os.Rename(oldPath, newPath)
+			}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			directory := t.TempDir()
+			store, err := NewStore(directory)
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeV3State(t, directory, minimalStateV3(time.Now().UTC()))
+			loaded, err := store.LoadCompatible()
+			if err != nil {
+				t.Fatal(err)
+			}
+			test.inject(store)
+			if _, err := store.CommitMigration(loaded); err == nil {
+				t.Fatal("expected migration failure")
+			}
+			contents, err := os.ReadFile(filepath.Join(directory, "state.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			version, err := schemaVersion(contents)
+			if err != nil || version != 3 {
+				t.Fatalf("failed migration changed active state: version=%d err=%v", version, err)
+			}
+		})
+	}
+}
+
+func TestStoreMigrationFinalDirectorySyncIsLogicalCommit(t *testing.T) {
+	directory := t.TempDir()
+	store, err := NewStore(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeV3State(t, directory, minimalStateV3(time.Now().UTC()))
+	loaded, err := store.LoadCompatible()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var syncs int
+	store.syncDirectory = func(path string) error {
+		syncs++
+		if syncs == 2 {
+			return errors.New("final directory sync failed")
+		}
+		return syncDirectory(path)
+	}
+	result, err := store.CommitMigration(loaded)
+	if err != nil || result.DurabilityConfirmed || result.DurabilityWarning == nil {
+		t.Fatalf("unexpected migration result %#v %v", result, err)
+	}
+	if current, err := store.Load(); err != nil || current.SchemaVersion != SchemaVersion {
+		t.Fatalf("logical migration commit is not visible: %#v %v", current, err)
+	}
+}
+
+func TestStoreMigrationRejectsChangedCandidateAndInvalidRestore(t *testing.T) {
+	directory := t.TempDir()
+	store, err := NewStore(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := minimalStateV3(time.Now().UTC())
+	writeV3State(t, directory, original)
+	loaded, err := store.LoadCompatible()
+	if err != nil {
+		t.Fatal(err)
+	}
+	original.QWeather.APIHost = "changed.re.qweatherapi.com"
+	writeV3State(t, directory, original)
+	if _, err := store.CommitMigration(loaded); err == nil || !strings.Contains(err.Error(), "changed") {
+		t.Fatalf("changed state was migrated: %v", err)
+	}
+	if _, err := store.RestoreV3Backup(); err == nil {
+		t.Fatal("restore accepted a non-v4 current state")
+	}
+}
+
 func TestStoreSaveIsAtomicAndRequiresInitialization(t *testing.T) {
 	store, err := NewStore(t.TempDir())
 	if err != nil {
@@ -259,5 +399,36 @@ func minimalState(now time.Time) State {
 		QWeather:     QWeatherState{APIHost: "account.re.qweatherapi.com"},
 		Cache:        DefaultCache(),
 		DeviceTokens: []DeviceToken{{ID: "device", Name: "Device", Hash: strings.Repeat("0", 64)}},
+	}
+}
+
+func minimalStateV3(now time.Time) stateV3 {
+	defaults := DefaultCache()
+	return stateV3{
+		SchemaVersion: 3,
+		UpdatedAt:     now,
+		Admin: AdminState{
+			Password:      PasswordHash{Algorithm: "test"},
+			PublicOrigins: []string{"https://admin.example.com"},
+		},
+		QWeather: QWeatherState{APIHost: "account.re.qweatherapi.com"},
+		Cache: cacheStateV3{
+			CurrentTTL: defaults.CurrentTTL, CurrentStaleMax: defaults.CurrentStaleMax,
+			HourlyTTL: defaults.HourlyTTL, HourlyStaleMax: defaults.HourlyStaleMax,
+			DailyTTL: defaults.DailyTTL, DailyStaleMax: defaults.DailyStaleMax,
+			MaxLocations: defaults.MaxLocations,
+		},
+		DeviceTokens: []DeviceToken{{ID: "device", Name: "Device", Hash: strings.Repeat("0", 64)}},
+	}
+}
+
+func writeV3State(t *testing.T, directory string, value stateV3) {
+	t.Helper()
+	contents, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "state.json"), contents, 0o600); err != nil {
+		t.Fatal(err)
 	}
 }

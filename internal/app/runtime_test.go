@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MingYuan0415/mt-server/internal/modules/weather"
 	"github.com/MingYuan0415/mt-server/internal/platform"
 	"github.com/MingYuan0415/mt-server/internal/platform/adminauth"
 	"github.com/MingYuan0415/mt-server/internal/platform/auth"
@@ -73,6 +74,39 @@ func TestRuntimeRejectsInvalidPersistentState(t *testing.T) {
 	value.QWeather.APIHost = "weather.example.com"
 	if err := NewRuntimeManager(slog.Default()).Apply(value); err == nil {
 		t.Fatal("expected invalid QWeather host error")
+	}
+}
+
+func TestRuntimeReplacementStartsFreshDiagnostics(t *testing.T) {
+	runtime := NewRuntimeManager(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	value := validRuntimeState(t)
+	if err := runtime.Apply(value); err != nil {
+		t.Fatal(err)
+	}
+	firstService := runtime.current.service
+	first, err := runtime.Diagnostics()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Apply(value); err != nil {
+		t.Fatal(err)
+	}
+	second, err := runtime.Diagnostics()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.current.service == firstService || second.RuntimeStarted.Before(first.RuntimeStarted) {
+		t.Fatalf("runtime replacement did not install fresh diagnostics: first=%#v second=%#v", first, second)
+	}
+	for kind, diagnostics := range second.Kinds {
+		if diagnostics != (weather.KindDiagnostics{}) {
+			t.Fatalf("replacement retained %s diagnostics: %#v", kind, diagnostics)
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := runtime.Close(ctx); err != nil {
+		t.Fatal(err)
 	}
 }
 

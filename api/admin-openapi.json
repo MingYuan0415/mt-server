@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "mt-server management API",
-    "version": "1.1.0",
+    "version": "1.2.0",
     "description": "Same-origin API used by the embedded management interface. Secret values are never returned after creation."
   },
   "servers": [{ "url": "https://api.example.com/admin/api/v1" }],
@@ -66,7 +66,7 @@
         "operationId": "replaceQWeatherSettings",
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/QWeatherInput" } } } },
         "responses": {
-          "200": { "description": "Tested, persisted, activated, and returned current weather verification", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/VerificationResponse" } } }, "headers": { "X-MT-State-Warning": { "$ref": "#/components/headers/StateWarning" } } },
+          "200": { "description": "Tested current weather and alerts, persisted, activated, and returned current weather verification", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/VerificationResponse" } } }, "headers": { "X-MT-State-Warning": { "$ref": "#/components/headers/StateWarning" } } },
           "400": { "$ref": "#/components/responses/Error" }, "422": { "$ref": "#/components/responses/Error" },
           "403": { "$ref": "#/components/responses/Error" },
           "429": { "$ref": "#/components/responses/Error" }, "502": { "$ref": "#/components/responses/Error" },
@@ -80,7 +80,7 @@
         "operationId": "testQWeatherSettings",
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/QWeatherInput" } } } },
         "responses": {
-          "200": { "description": "Connection test passed and returned current weather without persistence", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/VerificationResponse" } } } },
+          "200": { "description": "Current-weather and alert connection tests passed without persistence", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/VerificationResponse" } } } },
           "400": { "$ref": "#/components/responses/Error" }, "422": { "$ref": "#/components/responses/Error" },
           "403": { "$ref": "#/components/responses/Error" },
           "429": { "$ref": "#/components/responses/Error" }, "502": { "$ref": "#/components/responses/Error" },
@@ -123,6 +123,17 @@
           "404": { "$ref": "#/components/responses/Error" },
           "409": { "$ref": "#/components/responses/Error" },
           "500": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/diagnostics": {
+      "get": {
+        "summary": "Get privacy-preserving runtime diagnostics",
+        "operationId": "getRuntimeDiagnostics",
+        "responses": {
+          "200": { "description": "Process-local provider and cache diagnostics", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DiagnosticsResponse" } } } },
+          "401": { "$ref": "#/components/responses/Error" },
+          "503": { "$ref": "#/components/responses/Error" }
         }
       }
     },
@@ -259,22 +270,71 @@
       },
       "VerificationResponse": {
         "type": "object",
-        "required": ["status", "verification"],
+        "required": ["status", "verification", "tested_capabilities"],
         "properties": {
           "status": { "type": "string", "enum": ["ok", "saved"] },
           "public_key_fingerprint": { "type": "string" },
-          "verification": { "$ref": "#/components/schemas/Verification" }
+          "verification": { "$ref": "#/components/schemas/Verification" },
+          "tested_capabilities": { "type": "array", "prefixItems": [{ "const": "current" }, { "const": "alerts" }], "minItems": 2, "maxItems": 2 }
         }
       },
       "SetupResponse": {
         "type": "object",
-        "required": ["csrf_token", "device_token", "device", "qweather_public_key_fingerprint", "verification"],
+        "required": ["csrf_token", "device_token", "device", "qweather_public_key_fingerprint", "verification", "tested_capabilities"],
         "properties": {
           "csrf_token": { "type": "string" },
           "device_token": { "type": "string" },
           "device": { "type": "object" },
           "qweather_public_key_fingerprint": { "type": "string" },
-          "verification": { "$ref": "#/components/schemas/Verification" }
+          "verification": { "$ref": "#/components/schemas/Verification" },
+          "tested_capabilities": { "type": "array", "prefixItems": [{ "const": "current" }, { "const": "alerts" }], "minItems": 2, "maxItems": 2 }
+        }
+      },
+      "DiagnosticsResponse": {
+        "type": "object",
+        "required": ["generated_at", "runtime_started_at", "provider", "locations", "entries", "kinds"],
+        "properties": {
+          "generated_at": { "type": "string", "format": "date-time" },
+          "runtime_started_at": { "type": "string", "format": "date-time" },
+          "provider": { "$ref": "#/components/schemas/ProviderDiagnostics" },
+          "last_success_at": { "type": "string", "format": "date-time" },
+          "last_error_at": { "type": "string", "format": "date-time" },
+          "last_error_class": { "type": "string", "enum": ["bad_request", "credentials", "rate_limit", "server", "response", "timeout", "cancelled", "unknown"] },
+          "locations": { "type": "integer", "minimum": 0 },
+          "entries": { "type": "integer", "minimum": 0 },
+          "kinds": {
+            "type": "object",
+            "required": ["current", "hourly", "daily", "alerts"],
+            "properties": {
+              "current": { "$ref": "#/components/schemas/CacheKindDiagnostics" },
+              "hourly": { "$ref": "#/components/schemas/CacheKindDiagnostics" },
+              "daily": { "$ref": "#/components/schemas/CacheKindDiagnostics" },
+              "alerts": { "$ref": "#/components/schemas/CacheKindDiagnostics" }
+            }
+          }
+        }
+      },
+      "ProviderDiagnostics": {
+        "type": "object",
+        "required": ["status"],
+        "properties": {
+          "status": { "type": "string", "enum": ["ready", "blocked", "closed", "unavailable"] },
+          "blocked_until": { "type": "string", "format": "date-time" }
+        }
+      },
+      "CacheKindDiagnostics": {
+        "type": "object",
+        "required": ["entries", "fresh_entries", "stale_entries", "refreshing", "requests", "fresh_hits", "stale_hits", "fetch_successes", "fetch_failures"],
+        "properties": {
+          "entries": { "type": "integer", "minimum": 0 },
+          "fresh_entries": { "type": "integer", "minimum": 0 },
+          "stale_entries": { "type": "integer", "minimum": 0 },
+          "refreshing": { "type": "integer", "minimum": 0 },
+          "requests": { "type": "integer", "minimum": 0 },
+          "fresh_hits": { "type": "integer", "minimum": 0 },
+          "stale_hits": { "type": "integer", "minimum": 0 },
+          "fetch_successes": { "type": "integer", "minimum": 0 },
+          "fetch_failures": { "type": "integer", "minimum": 0 }
         }
       },
       "LoginRequest": { "type": "object", "required": ["password"], "properties": { "password": { "type": "string" } } },

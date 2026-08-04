@@ -33,6 +33,7 @@ func (m *Module) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/weather/current", m.handle(KindCurrent))
 	mux.HandleFunc("GET /api/v1/weather/hourly", m.handle(KindHourly))
 	mux.HandleFunc("GET /api/v1/weather/daily", m.handle(KindDaily))
+	mux.HandleFunc("GET /api/v1/weather/alerts", m.handle(KindAlerts))
 }
 
 // Start has no eager work because location is request-specific.

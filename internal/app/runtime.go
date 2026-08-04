@@ -115,6 +115,16 @@ func (m *RuntimeManager) Ready() error {
 	return m.current.service.Ready()
 }
 
+// Diagnostics returns the active runtime snapshot without provider I/O.
+func (m *RuntimeManager) Diagnostics() (weather.Diagnostics, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.current == nil {
+		return weather.Diagnostics{}, platform.ErrSetupRequired
+	}
+	return m.current.service.Diagnostics(), nil
+}
+
 // ServeHTTP dispatches through one consistent runtime snapshot.
 func (m *RuntimeManager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	m.mu.RLock()
@@ -152,6 +162,9 @@ func (m *RuntimeManager) Test(ctx context.Context, value state.State,
 	current, ok := result.Data.(weather.Current)
 	if !ok {
 		return weather.Verification{}, "", errors.New("QWeather current response has an unexpected type")
+	}
+	if _, err := provider.Fetch(ctx, weather.KindAlerts, point); err != nil {
+		return weather.Verification{}, "", fmt.Errorf("verify QWeather alerts: %w", err)
 	}
 	fingerprint, err := qweather.PublicKeyFingerprint([]byte(value.QWeather.PrivateKeyPEM))
 	if err != nil {
@@ -281,6 +294,8 @@ func (m *RuntimeManager) buildComponents(value state.State) (*qweather.Client,
 		HourlyStaleMax:  time.Duration(value.Cache.HourlyStaleMax) * time.Second,
 		DailyTTL:        time.Duration(value.Cache.DailyTTL) * time.Second,
 		DailyStaleMax:   time.Duration(value.Cache.DailyStaleMax) * time.Second,
+		AlertsTTL:       time.Duration(value.Cache.AlertsTTL) * time.Second,
+		AlertsStaleMax:  time.Duration(value.Cache.AlertsStaleMax) * time.Second,
 		MaxLocations:    value.Cache.MaxLocations,
 	}
 	return provider, options, credentials, nil
@@ -342,6 +357,7 @@ func validateCache(value state.CacheState) error {
 		value.CurrentStaleMax <= value.CurrentTTL ||
 		value.HourlyStaleMax <= value.HourlyTTL ||
 		value.DailyStaleMax <= value.DailyTTL ||
+		value.AlertsTTL <= 0 || value.AlertsStaleMax <= value.AlertsTTL ||
 		value.MaxLocations < 1 || value.MaxLocations > 1024 {
 		return errors.New("weather cache policy is invalid")
 	}

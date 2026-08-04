@@ -32,6 +32,13 @@ func (f *fakeProvider) Fetch(ctx context.Context, kind Kind,
 
 func (f *fakeProvider) Ready() error { return f.ready }
 
+func (f *fakeProvider) Diagnostics() ProviderDiagnostics {
+	if f.ready != nil {
+		return ProviderDiagnostics{Status: "blocked"}
+	}
+	return ProviderDiagnostics{Status: "ready"}
+}
+
 func (f *fakeProvider) Close() error {
 	f.closes.Add(1)
 	return nil
@@ -182,12 +189,70 @@ func TestServiceRejectsOveragedDataAfterRefreshFailure(t *testing.T) {
 	}
 }
 
+func TestServiceRejectsAlertsAtOneHourStaleLimit(t *testing.T) {
+	now := time.Date(2026, 8, 3, 0, 0, 0, 0, time.UTC)
+	provider := &fakeProvider{}
+	provider.fetch = func(context.Context, Kind, location.Point) (ProviderResult, error) {
+		if provider.calls.Load() == 1 {
+			return ProviderResult{UpdatedAt: now, Data: Alerts{Items: []Alert{}}}, nil
+		}
+		return ProviderResult{}, errors.New("offline")
+	}
+	service := NewService(provider, slog.New(slog.NewTextHandler(io.Discard, nil)), CacheOptions{
+		CurrentTTL: time.Minute, CurrentStaleMax: 10 * time.Minute,
+		HourlyTTL: time.Minute, HourlyStaleMax: 10 * time.Minute,
+		DailyTTL: time.Minute, DailyStaleMax: 10 * time.Minute,
+		AlertsTTL: 10 * time.Minute, AlertsStaleMax: time.Hour,
+		MaxLocations: 64,
+	})
+	service.now = func() time.Time { return now }
+	defer closeService(t, service)
+	point := location.Point{Latitude: 30, Longitude: 120}
+	if _, err := service.Get(context.Background(), KindAlerts, point); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Hour)
+	if _, err := service.Get(context.Background(), KindAlerts, point); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("expected alerts to expire at the stale limit, got %v", err)
+	}
+	if provider.calls.Load() != 2 {
+		t.Fatalf("expected an upstream retry after alert expiry, got %d calls", provider.calls.Load())
+	}
+}
+
 func TestServiceReadinessDelegatesProvider(t *testing.T) {
 	provider := &fakeProvider{ready: errors.New("circuit open"), fetch: successfulFetch(time.Now())}
 	service := newTestService(provider, 64)
 	defer closeService(t, service)
 	if service.Ready() == nil {
 		t.Fatal("expected readiness error")
+	}
+}
+
+func TestServiceDiagnosticsAreAggregatedWithoutSensitiveDimensions(t *testing.T) {
+	now := time.Date(2026, 8, 3, 0, 0, 0, 0, time.UTC)
+	provider := &fakeProvider{fetch: successfulFetch(now)}
+	service := newTestService(provider, 64)
+	service.now = func() time.Time { return now }
+	service.started = now.Add(-time.Minute)
+	defer closeService(t, service)
+	point := location.Point{Latitude: 30, Longitude: 120}
+	if _, err := service.Get(context.Background(), KindCurrent, point); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Get(context.Background(), KindCurrent, point); err != nil {
+		t.Fatal(err)
+	}
+	diagnostics := service.Diagnostics()
+	current := diagnostics.Kinds[KindCurrent]
+	if diagnostics.Provider.Status != "ready" || diagnostics.Locations != 1 ||
+		diagnostics.Entries != 1 || diagnostics.LastSuccessAt == nil ||
+		current.Requests != 2 || current.FreshHits != 1 || current.FetchSuccesses != 1 ||
+		current.Entries != 1 || current.FreshEntries != 1 {
+		t.Fatalf("unexpected diagnostics %#v", diagnostics)
+	}
+	if _, ok := diagnostics.Kinds[KindAlerts]; !ok {
+		t.Fatalf("alerts diagnostics are missing: %#v", diagnostics.Kinds)
 	}
 }
 
@@ -269,6 +334,8 @@ func newTestService(provider Provider, maximum int) *Service {
 		HourlyStaleMax:  10 * time.Minute,
 		DailyTTL:        time.Minute,
 		DailyStaleMax:   10 * time.Minute,
+		AlertsTTL:       time.Minute,
+		AlertsStaleMax:  10 * time.Minute,
 		MaxLocations:    maximum,
 	})
 }

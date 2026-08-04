@@ -66,6 +66,9 @@ func (e *UpstreamError) RetryDelay() time.Duration {
 	return e.Delay
 }
 
+// DiagnosticClass exposes only the bounded operational category.
+func (e *UpstreamError) DiagnosticClass() string { return string(e.Class) }
+
 // Client calls one account-specific QWeather API host.
 type Client struct {
 	baseURL         *url.URL
@@ -137,6 +140,20 @@ func (c *Client) Ready() error {
 	return nil
 }
 
+// Diagnostics returns circuit state without making an upstream request.
+func (c *Client) Diagnostics() weather.ProviderDiagnostics {
+	c.circuitMu.Lock()
+	defer c.circuitMu.Unlock()
+	if c.closed {
+		return weather.ProviderDiagnostics{Status: "closed"}
+	}
+	if c.now().Before(c.blockedUntil) {
+		until := c.blockedUntil.UTC()
+		return weather.ProviderDiagnostics{Status: "blocked", BlockedUntil: &until}
+	}
+	return weather.ProviderDiagnostics{Status: "ready"}
+}
+
 // Fetch obtains one normalized weather dataset.
 func (c *Client) Fetch(ctx context.Context, kind weather.Kind,
 	point location.Point) (weather.ProviderResult, error) {
@@ -148,6 +165,8 @@ func (c *Client) Fetch(ctx context.Context, kind weather.Kind,
 		path = "/v7/weather/24h"
 	case weather.KindDaily:
 		path = "/v7/weather/7d"
+	case weather.KindAlerts:
+		path = "/v7/warning/now"
 	default:
 		return weather.ProviderResult{}, fmt.Errorf("unsupported weather kind %q", kind)
 	}
@@ -167,6 +186,8 @@ func (c *Client) Fetch(ctx context.Context, kind weather.Kind,
 		return parseHourly(body)
 	case weather.KindDaily:
 		return parseDaily(body)
+	case weather.KindAlerts:
+		return parseAlerts(body)
 	default:
 		return weather.ProviderResult{}, fmt.Errorf("unsupported weather kind %q", kind)
 	}

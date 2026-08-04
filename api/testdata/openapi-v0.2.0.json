@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "mt-server weather API",
-    "version": "1.1.0",
+    "version": "1.0.0",
     "description": "Versioned authenticated weather API implemented by mt-server. Weather data is provided by QWeather."
   },
   "servers": [
@@ -109,43 +109,6 @@
                   ]
                 },
                 "examples": { "default": { "$ref": "#/components/examples/DailyWeatherResponse" } }
-              }
-            }
-          },
-          "400": { "$ref": "#/components/responses/InvalidLocation" },
-          "401": { "$ref": "#/components/responses/Unauthorized" },
-          "429": { "$ref": "#/components/responses/LocationRateLimited" },
-          "504": { "$ref": "#/components/responses/GatewayTimeout" },
-          "503": { "$ref": "#/components/responses/Unavailable" }
-        }
-      }
-    },
-    "/api/v1/weather/alerts": {
-      "get": {
-        "summary": "Get current weather alerts",
-        "operationId": "getWeatherAlerts",
-        "security": [{ "bearerAuth": [] }],
-        "parameters": [
-          { "$ref": "#/components/parameters/LocationLatitude" },
-          { "$ref": "#/components/parameters/LocationLongitude" },
-          { "$ref": "#/components/parameters/LocationProvider" },
-          { "$ref": "#/components/parameters/LocationCity" },
-          { "$ref": "#/components/parameters/LocationRegion" },
-          { "$ref": "#/components/parameters/LocationCountry" },
-          { "$ref": "#/components/parameters/LocationTimezone" }
-        ],
-        "responses": {
-          "200": {
-            "description": "Complete current alert snapshot; an empty item array means no alerts",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "allOf": [
-                    { "$ref": "#/components/schemas/WeatherEnvelope" },
-                    { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/WeatherAlerts" } } }
-                  ]
-                },
-                "examples": { "default": { "$ref": "#/components/examples/WeatherAlertsResponse" } }
               }
             }
           },
@@ -371,49 +334,6 @@
             ]
           }
         }
-      },
-      "WeatherAlertsResponse": {
-        "summary": "Current weather-alert snapshot",
-        "value": {
-          "schema_version": 1,
-          "source": {
-            "id": "qweather",
-            "name": "QWeather",
-            "attribution_url": "https://www.qweather.com/"
-          },
-          "location": {
-            "city": "Example City",
-            "country": "EX",
-            "source": "device",
-            "provider": "example",
-            "precision": "city"
-          },
-          "fetched_at": "2026-08-02T02:00:00Z",
-          "updated_at": "2026-08-02T01:58:00Z",
-          "valid_until": "2026-08-02T02:10:00Z",
-          "stale": false,
-          "data": {
-            "detail_url": "https://www.qweather.com/severe-weather/example.html",
-            "truncated": false,
-            "items": [{
-              "id": "example-warning-1",
-              "title": "Example severe weather alert",
-              "issuing_authority": "Example Meteorological Service",
-              "type_code": "EX001",
-              "type_name": "Example warning",
-              "severity": "severe",
-              "status": "active",
-              "issued_at": "2026-08-02T01:30:00Z",
-              "starts_at": "2026-08-02T01:30:00Z",
-              "ends_at": "2026-08-02T06:00:00Z",
-              "urgency": "immediate",
-              "certainty": "likely",
-              "description": "Example warning description.",
-              "instruction": "Follow official local guidance.",
-              "content_truncated": false
-            }]
-          }
-        }
       }
     },
     "schemas": {
@@ -549,41 +469,6 @@
           "visibility_km": { "type": "number" },
           "cloud_percent": { "type": "number" },
           "uv_index": { "type": "number" }
-        }
-      },
-      "WeatherAlerts": {
-        "type": "object",
-        "description": "A complete provider snapshot. Clients replace their prior alert list for this location.",
-        "required": ["truncated", "items"],
-        "properties": {
-          "detail_url": { "type": "string", "format": "uri" },
-          "truncated": { "type": "boolean" },
-          "items": {
-            "type": "array",
-            "maxItems": 32,
-            "items": { "$ref": "#/components/schemas/WeatherAlert" }
-          }
-        }
-      },
-      "WeatherAlert": {
-        "type": "object",
-        "required": ["id", "title", "type_code", "type_name", "severity", "status", "issued_at", "urgency", "certainty", "content_truncated"],
-        "properties": {
-          "id": { "type": "string", "minLength": 1, "maxLength": 128 },
-          "title": { "type": "string", "minLength": 1, "maxLength": 256 },
-          "issuing_authority": { "type": "string", "maxLength": 128 },
-          "type_code": { "type": "string", "minLength": 1, "maxLength": 128 },
-          "type_name": { "type": "string", "minLength": 1, "maxLength": 128 },
-          "severity": { "type": "string", "enum": ["unknown", "minor", "moderate", "severe", "extreme"] },
-          "status": { "type": "string", "enum": ["unknown", "active", "cancelled"] },
-          "issued_at": { "type": "string", "format": "date-time" },
-          "starts_at": { "type": "string", "format": "date-time" },
-          "ends_at": { "type": "string", "format": "date-time" },
-          "urgency": { "type": "string", "enum": ["unknown", "future", "expected", "immediate", "past"] },
-          "certainty": { "type": "string", "enum": ["unknown", "unlikely", "possible", "likely", "observed"] },
-          "description": { "type": "string", "maxLength": 8192 },
-          "instruction": { "type": "string", "maxLength": 4096 },
-          "content_truncated": { "type": "boolean" }
         }
       },
       "ErrorResponse": {

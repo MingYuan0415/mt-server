@@ -78,3 +78,26 @@ type dailyResponse struct {
 		UVIndex            string `json:"uvIndex"`
 	} `json:"daily"`
 }
+
+type alertsResponse struct {
+	commonResponse
+	FXLink  string `json:"fxLink"`
+	Warning []struct {
+		ID          string `json:"id"`
+		Sender      string `json:"sender"`
+		SenderName  string `json:"senderName"`
+		PublishedAt string `json:"pubTime"`
+		Title       string `json:"title"`
+		StartsAt    string `json:"startTime"`
+		EndsAt      string `json:"endTime"`
+		Status      string `json:"status"`
+		Level       string `json:"level"`
+		Severity    string `json:"severity"`
+		TypeCode    string `json:"type"`
+		TypeName    string `json:"typeName"`
+		Urgency     string `json:"urgency"`
+		Certainty   string `json:"certainty"`
+		Text        string `json:"text"`
+		Instruction string `json:"instruction"`
+	} `json:"warning"`
+}

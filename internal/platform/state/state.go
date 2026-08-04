@@ -15,8 +15,10 @@ import (
 
 const (
 	// SchemaVersion is the current on-disk format.
-	SchemaVersion = 3
-	maximumSize   = 1024 * 1024
+	SchemaVersion       = 4
+	previousSchema      = 3
+	maximumSize         = 1024 * 1024
+	migrationBackupName = "state.v3.backup.json"
 )
 
 var (
@@ -72,6 +74,8 @@ type CacheState struct {
 	HourlyStaleMax  int64 `json:"hourly_stale_max_seconds"`
 	DailyTTL        int64 `json:"daily_ttl_seconds"`
 	DailyStaleMax   int64 `json:"daily_stale_max_seconds"`
+	AlertsTTL       int64 `json:"alerts_ttl_seconds"`
+	AlertsStaleMax  int64 `json:"alerts_stale_max_seconds"`
 	MaxLocations    int   `json:"max_locations"`
 }
 
@@ -92,8 +96,37 @@ func DefaultCache() CacheState {
 		HourlyStaleMax:  int64((12 * time.Hour) / time.Second),
 		DailyTTL:        int64((4 * time.Hour) / time.Second),
 		DailyStaleMax:   int64((48 * time.Hour) / time.Second),
+		AlertsTTL:       int64((10 * time.Minute) / time.Second),
+		AlertsStaleMax:  int64(time.Hour / time.Second),
 		MaxLocations:    64,
 	}
+}
+
+// CompatibleState is a validated JSON shape that may still require an atomic
+// on-disk migration before its runtime can be activated.
+type CompatibleState struct {
+	State         State
+	SourceVersion int
+	source        []byte
+}
+
+type stateV3 struct {
+	SchemaVersion int           `json:"schema_version"`
+	UpdatedAt     time.Time     `json:"updated_at"`
+	Admin         AdminState    `json:"admin"`
+	QWeather      QWeatherState `json:"qweather"`
+	Cache         cacheStateV3  `json:"cache"`
+	DeviceTokens  []DeviceToken `json:"device_tokens"`
+}
+
+type cacheStateV3 struct {
+	CurrentTTL      int64 `json:"current_ttl_seconds"`
+	CurrentStaleMax int64 `json:"current_stale_max_seconds"`
+	HourlyTTL       int64 `json:"hourly_ttl_seconds"`
+	HourlyStaleMax  int64 `json:"hourly_stale_max_seconds"`
+	DailyTTL        int64 `json:"daily_ttl_seconds"`
+	DailyStaleMax   int64 `json:"daily_stale_max_seconds"`
+	MaxLocations    int   `json:"max_locations"`
 }
 
 // Store owns the private application state directory.
@@ -141,6 +174,97 @@ func (s *Store) Load() (State, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.loadLocked()
+}
+
+// LoadCompatible reads the current state or converts schema v3 in memory. A
+// converted state must be passed to CommitMigration before it is activated.
+func (s *Store) LoadCompatible() (CompatibleState, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	contents, err := s.readStateLocked()
+	if err != nil {
+		return CompatibleState{}, err
+	}
+	version, err := schemaVersion(contents)
+	if err != nil {
+		return CompatibleState{}, err
+	}
+	switch version {
+	case SchemaVersion:
+		value, err := decodeState(contents)
+		return CompatibleState{State: value, SourceVersion: version, source: contents}, err
+	case previousSchema:
+		value, err := decodeStateV3(contents)
+		if err != nil {
+			return CompatibleState{}, err
+		}
+		return CompatibleState{State: migrateV3(value), SourceVersion: version, source: contents}, nil
+	case 2:
+		return CompatibleState{}, errors.New("unsupported state schema version 2; back up and clear the v0.1 state before setup")
+	default:
+		return CompatibleState{}, fmt.Errorf("unsupported state schema version %d", version)
+	}
+}
+
+// CommitMigration saves the original v3 state as a private backup before
+// atomically replacing the active file with schema v4.
+func (s *Store) CommitMigration(loaded CompatibleState) (WriteResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if loaded.SourceVersion != previousSchema || loaded.State.SchemaVersion != SchemaVersion ||
+		len(loaded.source) == 0 {
+		return WriteResult{}, errors.New("state migration candidate is invalid")
+	}
+	current, err := readBounded(s.statePath)
+	if err != nil {
+		return WriteResult{}, fmt.Errorf("read application state before migration: %w", err)
+	}
+	if !bytes.Equal(current, loaded.source) {
+		return WriteResult{}, errors.New("application state changed before migration")
+	}
+	backupPath := filepath.Join(s.directory, migrationBackupName)
+	backupResult, err := s.atomicWriteContents(backupPath, loaded.source)
+	if err != nil {
+		return WriteResult{}, fmt.Errorf("write migration backup: %w", err)
+	}
+	if !backupResult.DurabilityConfirmed {
+		return WriteResult{}, fmt.Errorf("migration backup durability is unconfirmed: %w",
+			backupResult.DurabilityWarning)
+	}
+	return s.writeStateLocked(loaded.State)
+}
+
+// RestoreV3Backup atomically restores the private schema-v3 migration backup.
+// The caller must hold the process-wide state directory lock.
+func (s *Store) RestoreV3Backup() (WriteResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current, err := readBounded(s.statePath)
+	if err != nil {
+		return WriteResult{}, fmt.Errorf("read current application state: %w", err)
+	}
+	version, err := schemaVersion(current)
+	if err != nil {
+		return WriteResult{}, err
+	}
+	if version != SchemaVersion {
+		return WriteResult{}, fmt.Errorf("current state schema must be %d", SchemaVersion)
+	}
+	backup, err := readBounded(filepath.Join(s.directory, migrationBackupName))
+	if err != nil {
+		return WriteResult{}, fmt.Errorf("read schema v3 migration backup: %w", err)
+	}
+	backupVersion, err := schemaVersion(backup)
+	if err != nil {
+		return WriteResult{}, err
+	}
+	if backupVersion != previousSchema {
+		return WriteResult{}, errors.New("migration backup is not schema version 3")
+	}
+	if _, err := decodeStateV3(backup); err != nil {
+		return WriteResult{}, err
+	}
+	return s.atomicWriteContents(s.statePath, backup)
 }
 
 // Save atomically replaces initialized state.
@@ -193,35 +317,85 @@ func (s *Store) RenameForTest(rename func(string, string) error) {
 }
 
 func (s *Store) loadLocked() (State, error) {
+	contents, err := s.readStateLocked()
+	if err != nil {
+		return State{}, err
+	}
+	version, err := schemaVersion(contents)
+	if err != nil {
+		return State{}, err
+	}
+	if version != SchemaVersion {
+		if version == 2 {
+			return State{}, errors.New("unsupported state schema version 2; back up and clear the v0.1 state before setup")
+		}
+		return State{}, fmt.Errorf("unsupported state schema version %d", version)
+	}
+	return decodeState(contents)
+}
+
+func (s *Store) readStateLocked() ([]byte, error) {
 	contents, err := readBounded(s.statePath)
 	if errors.Is(err, os.ErrNotExist) {
-		return State{}, ErrNotInitialized
+		return nil, ErrNotInitialized
 	}
 	if err != nil {
-		return State{}, fmt.Errorf("read application state: %w", err)
+		return nil, fmt.Errorf("read application state: %w", err)
 	}
+	return contents, nil
+}
+
+func schemaVersion(contents []byte) (int, error) {
 	var header struct {
 		SchemaVersion int `json:"schema_version"`
 	}
 	if err := json.Unmarshal(contents, &header); err != nil {
-		return State{}, fmt.Errorf("decode application state: %w", err)
+		return 0, fmt.Errorf("decode application state: %w", err)
 	}
-	if header.SchemaVersion != SchemaVersion {
-		if header.SchemaVersion == 2 {
-			return State{}, errors.New("unsupported state schema version 2; back up and clear the v0.1 state before v0.2 setup")
-		}
-		return State{}, fmt.Errorf("unsupported state schema version %d", header.SchemaVersion)
-	}
+	return header.SchemaVersion, nil
+}
+
+func decodeState(contents []byte) (State, error) {
 	var value State
-	decoder := json.NewDecoder(bytes.NewReader(contents))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&value); err != nil {
-		return State{}, fmt.Errorf("decode application state: %w", err)
-	}
-	if err := ensureJSONEOF(decoder); err != nil {
+	if err := decodeStrict(contents, &value); err != nil {
 		return State{}, err
 	}
 	return value, nil
+}
+
+func decodeStateV3(contents []byte) (stateV3, error) {
+	var value stateV3
+	if err := decodeStrict(contents, &value); err != nil {
+		return stateV3{}, err
+	}
+	return value, nil
+}
+
+func decodeStrict(contents []byte, value any) error {
+	decoder := json.NewDecoder(bytes.NewReader(contents))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(value); err != nil {
+		return fmt.Errorf("decode application state: %w", err)
+	}
+	return ensureJSONEOF(decoder)
+}
+
+func migrateV3(value stateV3) State {
+	defaults := DefaultCache()
+	return State{
+		SchemaVersion: SchemaVersion,
+		UpdatedAt:     value.UpdatedAt,
+		Admin:         value.Admin,
+		QWeather:      value.QWeather,
+		Cache: CacheState{
+			CurrentTTL: value.Cache.CurrentTTL, CurrentStaleMax: value.Cache.CurrentStaleMax,
+			HourlyTTL: value.Cache.HourlyTTL, HourlyStaleMax: value.Cache.HourlyStaleMax,
+			DailyTTL: value.Cache.DailyTTL, DailyStaleMax: value.Cache.DailyStaleMax,
+			AlertsTTL: defaults.AlertsTTL, AlertsStaleMax: defaults.AlertsStaleMax,
+			MaxLocations: value.Cache.MaxLocations,
+		},
+		DeviceTokens: value.DeviceTokens,
+	}
 }
 
 func (s *Store) writeStateLocked(value State) (WriteResult, error) {
@@ -244,6 +418,13 @@ func (s *Store) atomicWrite(path string, value any) (WriteResult, error) {
 	if contents.Len() > maximumSize {
 		return WriteResult{}, errors.New("state exceeds 1 MiB")
 	}
+	return s.atomicWriteContents(path, contents.Bytes())
+}
+
+func (s *Store) atomicWriteContents(path string, contents []byte) (WriteResult, error) {
+	if len(contents) > maximumSize {
+		return WriteResult{}, errors.New("state exceeds 1 MiB")
+	}
 	temporary, err := s.createTemporary(s.directory, ".mt-server-*")
 	if err != nil {
 		return WriteResult{}, fmt.Errorf("create temporary state: %w", err)
@@ -259,7 +440,7 @@ func (s *Store) atomicWrite(path string, value any) (WriteResult, error) {
 	if err := temporary.Chmod(0o600); err != nil {
 		return WriteResult{}, err
 	}
-	if _, err := temporary.Write(contents.Bytes()); err != nil {
+	if _, err := temporary.Write(contents); err != nil {
 		return WriteResult{}, err
 	}
 	if err := s.syncFile(temporary); err != nil {

@@ -10,6 +10,7 @@ const (
 	KindCurrent Kind = "current"
 	KindHourly  Kind = "hourly"
 	KindDaily   Kind = "daily"
+	KindAlerts  Kind = "alerts"
 )
 
 // Source identifies the data provider for attribution.
@@ -127,6 +128,32 @@ type Day struct {
 	VisibilityKM       float64    `json:"visibility_km"`
 	CloudPercent       *float64   `json:"cloud_percent,omitempty"`
 	UVIndex            float64    `json:"uv_index"`
+}
+
+// Alerts is the complete warning snapshot returned by the provider.
+type Alerts struct {
+	DetailURL string  `json:"detail_url,omitempty"`
+	Truncated bool    `json:"truncated"`
+	Items     []Alert `json:"items"`
+}
+
+// Alert is one normalized weather warning.
+type Alert struct {
+	ID               string     `json:"id"`
+	Title            string     `json:"title"`
+	IssuingAuthority string     `json:"issuing_authority,omitempty"`
+	TypeCode         string     `json:"type_code"`
+	TypeName         string     `json:"type_name"`
+	Severity         string     `json:"severity"`
+	Status           string     `json:"status"`
+	IssuedAt         time.Time  `json:"issued_at"`
+	StartsAt         *time.Time `json:"starts_at,omitempty"`
+	EndsAt           *time.Time `json:"ends_at,omitempty"`
+	Urgency          string     `json:"urgency"`
+	Certainty        string     `json:"certainty"`
+	Description      string     `json:"description,omitempty"`
+	Instruction      string     `json:"instruction,omitempty"`
+	ContentTruncated bool       `json:"content_truncated"`
 }
 
 // ProviderResult carries normalized data and the provider update time.

@@ -101,6 +101,23 @@
           </dl>
           <div id="overview-verification" class="verification hidden"></div>
           <div id="durability-warning" class="message warning hidden" role="status"></div>
+          <div class="diagnostics-heading">
+            <h3>运行诊断</h3>
+            <button class="secondary" id="refresh-diagnostics" type="button">刷新</button>
+          </div>
+          <dl class="status-grid diagnostics-status">
+            <div><dt>供应商状态</dt><dd id="diagnostics-provider">-</dd></div>
+            <div><dt>运行时启动</dt><dd id="diagnostics-started">-</dd></div>
+            <div><dt>最近成功</dt><dd id="diagnostics-success">-</dd></div>
+            <div><dt>最近错误</dt><dd id="diagnostics-error">-</dd></div>
+          </dl>
+          <div class="diagnostics-table-wrap">
+            <table class="diagnostics-table">
+              <thead><tr><th>数据</th><th>条目</th><th>请求</th><th>新鲜命中</th><th>陈旧返回</th><th>刷新成功</th><th>刷新失败</th></tr></thead>
+              <tbody id="diagnostics-kinds"></tbody>
+            </table>
+          </div>
+          <div id="diagnostics-message" class="message hidden" role="status"></div>
         </section>
 
         <section class="panel" data-panel="qweather">

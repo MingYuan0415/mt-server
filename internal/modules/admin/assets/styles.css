@@ -93,7 +93,7 @@ button:disabled { cursor: wait; opacity: .58; }
 }
 .tab:hover { background: #dce3e8; }
 .tab.active { background: var(--surface); color: var(--accent-strong); box-shadow: inset 3px 0 0 var(--accent); }
-.workspace { width: min(900px, 100%); padding: 38px 42px 80px; }
+.workspace { width: min(900px, 100%); min-width: 0; padding: 38px 42px 80px; }
 .panel { display: none; }
 .panel.active { display: block; }
 .section-heading { border-bottom: 1px solid var(--line); margin-bottom: 24px; padding-bottom: 15px; }
@@ -103,6 +103,16 @@ button:disabled { cursor: wait; opacity: .58; }
 .status-grid div { padding: 18px 4px; border-bottom: 1px solid var(--line); }
 .status-grid dt { color: var(--muted); font-size: 12px; font-weight: 700; }
 .status-grid dd { margin: 7px 0 0; font-weight: 750; }
+.diagnostics-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 32px; }
+.diagnostics-heading h3 { margin: 0; font-size: 18px; letter-spacing: 0; }
+.diagnostics-heading .secondary { min-height: 34px; padding: 6px 12px; }
+.diagnostics-status { margin-top: 12px; }
+.diagnostics-table-wrap { max-width: 100%; min-width: 0; margin-top: 22px; overflow-x: auto; }
+.diagnostics-table { width: 100%; min-width: 700px; border-collapse: collapse; font-size: 13px; }
+.diagnostics-table th, .diagnostics-table td { padding: 11px 10px; border-bottom: 1px solid var(--line); text-align: right; white-space: nowrap; }
+.diagnostics-table th:first-child, .diagnostics-table td:first-child { text-align: left; }
+.diagnostics-table th { color: var(--muted); font-size: 12px; }
+#diagnostics-message { margin-top: 16px; }
 .readonly-row { display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 14px; padding: 12px 0; border-bottom: 1px solid var(--line); }
 .readonly-row span { color: var(--muted); font-size: 13px; }
 .readonly-row code { overflow-wrap: anywhere; font-size: 12px; }
@@ -132,6 +142,7 @@ dialog code { display: block; margin: 20px 0; padding: 14px; background: #eef2f4
   .workspace { padding: 26px 18px 64px; }
   .button-row { align-items: stretch; flex-direction: column; }
   .button-row button { width: 100%; }
+  .diagnostics-heading { align-items: stretch; }
   .test-location-actions { align-items: stretch; flex-direction: column; }
   .test-location-actions button { width: 100%; }
 }

@@ -24,13 +24,14 @@ import (
 )
 
 type fakeRuntime struct {
-	testError   error
-	testCalls   int
-	applied     state.State
-	tokens      []state.DeviceToken
-	testPoint   *location.Point
-	testStarted chan struct{}
-	testRelease chan struct{}
+	testError        error
+	testCalls        int
+	applied          state.State
+	tokens           []state.DeviceToken
+	testPoint        *location.Point
+	testStarted      chan struct{}
+	testRelease      chan struct{}
+	diagnosticsError error
 }
 
 type fakePreparedChange struct {
@@ -67,6 +68,9 @@ func (f *fakeRuntime) PrepareTokens(tokens []state.DeviceToken) (platform.Prepar
 	return &fakePreparedChange{activate: func() { f.tokens = prepared }}, nil
 }
 func (f *fakeRuntime) Ready() error { return nil }
+func (f *fakeRuntime) Diagnostics() (weather.Diagnostics, error) {
+	return weather.Diagnostics{Provider: weather.ProviderDiagnostics{Status: "ready"}}, f.diagnosticsError
+}
 
 func testVerification() weather.Verification {
 	return weather.Verification{
@@ -140,6 +144,28 @@ func TestSetupPersistsHashedSecretsAndCreatesSession(t *testing.T) {
 	}
 	if runtime.testCalls != 1 {
 		t.Fatalf("repeated setup called QWeather %d times", runtime.testCalls)
+	}
+}
+
+func TestDiagnosticsRequiresSessionAndReturnsSafeSnapshot(t *testing.T) {
+	handler, _, runtime, publicCSRF := newTestHandler(t)
+	setup := performSetup(t, handler, publicCSRF)
+	cookie := setup.Result().Cookies()[0]
+	unauthorized := plainRequest(handler, http.MethodGet, "/admin/api/v1/diagnostics", nil)
+	if unauthorized.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated diagnostics returned %d", unauthorized.Code)
+	}
+	response := authenticatedRequest(t, handler, http.MethodGet,
+		"/admin/api/v1/diagnostics", nil, cookie, "")
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"status":"ready"`) {
+		t.Fatalf("unexpected diagnostics response %d %s", response.Code, response.Body.String())
+	}
+	runtime.diagnosticsError = errors.New("unavailable")
+	unavailable := authenticatedRequest(t, handler, http.MethodGet,
+		"/admin/api/v1/diagnostics", nil, cookie, "")
+	if unavailable.Code != http.StatusServiceUnavailable ||
+		!strings.Contains(unavailable.Body.String(), "diagnostics_unavailable") {
+		t.Fatalf("unexpected unavailable diagnostics %d %s", unavailable.Code, unavailable.Body.String())
 	}
 }
 

@@ -8,14 +8,15 @@
 
 - 未配置实例可正常启动，并通过管理网页完成首次初始化。
 - 管理 QWeather Ed25519 凭据、连接验证和运行时热切换。
-- 提供实时天气、24 小时逐小时预报和 7 天逐日预报。
+- 提供实时天气、24 小时逐小时预报、7 天逐日预报和天气预警。
 - 使用 Bearer token 鉴权，支持最多 32 个命名令牌、重叠轮换和撤销。
 - 校验请求位置并归一化到 `0.1` 度网格，不记录或返回坐标和客户端 IP。
 - 按位置网格隔离 LRU 内存缓存，支持并发刷新合并和陈旧数据降级。
 - 按鉴权主体限制短时间位置跳变，保护上游配额。
 - 使用 Argon2id 管理员密码、内存 session、同源校验、CSRF 和全局登录限速。
 - 通过初始化和管理网页维护 HTTPS Origin 白名单，新增入口无需重启容器。
-- 提供版本化状态、可报告持久性结果的原子写入、健康检查和结构化访问日志。
+- 提供版本化状态、v3 到 v4 自动迁移、可报告持久性结果的原子写入、健康检查和结构化访问日志。
+- 在已认证管理页展示不含设备或位置维度的供应商与缓存诊断。
 - 提供 scratch、非 root、只读根文件系统的多架构容器镜像。
 
 ## 部署
@@ -50,7 +51,7 @@ MT_PUBLIC_HOST=api.example.com docker compose -f deploy/compose.https.yaml up -d
 - 仅用于本次 QWeather 实时验证的临时坐标。
 - 首个设备名称。
 
-验证成功后，服务原子创建 `state.json`、热加载天气运行时，并仅显示一次首个设备令牌。后续可在管理界面增删管理域名、测试或更新 QWeather、修改管理员密码，以及创建和撤销设备令牌。私钥保存后只返回公钥指纹。
+验证会同时检查 QWeather 实时天气和天气预警能力。成功后，服务原子创建 `state.json`、热加载天气运行时，并仅显示一次首个设备令牌。后续可在管理界面增删管理域名、查看运行诊断、测试或更新 QWeather、修改管理员密码，以及创建和撤销设备令牌。私钥保存后只返回公钥指纹。
 
 未初始化时 `/health/live` 返回 `200`，`/health/ready` 返回 `503 setup_required`，天气接口返回 `503 service_unconfigured`。未初始化实例没有管理员身份边界，应先在受限网络中完成配置。
 
@@ -60,6 +61,7 @@ MT_PUBLIC_HOST=api.example.com docker compose -f deploy/compose.https.yaml up -d
 GET /api/v1/weather/current
 GET /api/v1/weather/hourly
 GET /api/v1/weather/daily
+GET /api/v1/weather/alerts
 ```
 
 每个请求需要设备 Bearer token，以及纬度、经度和位置来源标识。城市、地区、国家和时区为可选显示元数据：
@@ -79,6 +81,8 @@ curl https://api.example.com/api/v1/weather/current \
 服务先完成鉴权，再解析位置头。坐标必须有限且在合法范围内；来源标识必须匹配 `[a-z0-9][a-z0-9._-]{0,31}`；可选元数据必须为合法 UTF-8、无控制字符且不超过 128 个字符。服务不读取客户端地址、`X-Forwarded-For`、查询参数或代理位置头，也不会发起位置解析请求。
 
 缺少必填位置头返回 `400 location_required`，非法内容返回 `400 invalid_location`，位置变化超限返回 `429 location_rate_limited`。完整请求、响应和错误契约见 [`api/openapi.json`](api/openapi.json)。
+
+预警端点返回当前位置的完整预警快照；空数组表示当前没有预警。客户端应以每次响应替换同一位置的旧快照。预警默认缓存 10 分钟，上游故障时最多返回 1 小时内的陈旧快照，并通过 `stale` 明确标记。
 
 ## 运行配置
 

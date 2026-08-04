@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -55,6 +56,20 @@ const dailyFixture = `{
     "windScaleDay":"2","windSpeedDay":"9","wind360Night":"90","windDirNight":"东风",
     "windScaleNight":"2","windSpeedNight":"7","humidity":"74","precip":"0.0",
     "pressure":"1004","vis":"18","cloud":"60","uvIndex":"6"
+  }]
+}`
+
+const alertsFixture = `{
+  "code":"200",
+  "updateTime":"2026-08-02T10:00+08:00",
+  "fxLink":"https://www.qweather.com/severe-weather/example.html",
+  "warning":[{
+    "id":"warning-active","sender":"示例气象台",
+    "pubTime":"2026-08-02T09:30+08:00","title":"高温橙色预警",
+    "startTime":"2026-08-02T09:30+08:00","endTime":"2026-08-02T18:00+08:00",
+    "status":"预警中","level":"橙色","severity":"Severe",
+    "type":"11B09","typeName":"高温","urgency":"Immediate","certainty":"Likely",
+    "text":"预计白天气温较高。","instruction":"减少户外活动。"
   }]
 }`
 
@@ -139,6 +154,7 @@ func TestClientFetchesAndNormalizesAllDatasets(t *testing.T) {
 		"/v7/weather/now": currentFixture,
 		"/v7/weather/24h": hourlyFixture,
 		"/v7/weather/7d":  dailyFixture,
+		"/v7/warning/now": alertsFixture,
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
@@ -185,6 +201,84 @@ func TestClientFetchesAndNormalizesAllDatasets(t *testing.T) {
 	_, offset := day.Sunrise.Zone()
 	if offset != 8*60*60 {
 		t.Fatalf("daily local offset was not preserved: %#v", day.Sunrise)
+	}
+	alerts, err := client.Fetch(context.Background(), weather.KindAlerts, point)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alertData := alerts.Data.(weather.Alerts)
+	if len(alertData.Items) != 1 || alertData.Items[0].Severity != "severe" ||
+		alertData.Items[0].Status != "active" || alertData.Items[0].StartsAt == nil ||
+		alertData.DetailURL == "" {
+		t.Fatalf("unexpected alerts data %#v", alertData)
+	}
+}
+
+func TestParseAlertsSupportsEmptyAndBoundsPublicContent(t *testing.T) {
+	empty, err := parseAlerts([]byte(`{
+      "updateTime":"2026-08-02T10:00+08:00","warning":[]
+    }`))
+	if err != nil || len(empty.Data.(weather.Alerts).Items) != 0 {
+		t.Fatalf("unexpected empty alerts result %#v %v", empty, err)
+	}
+	longText := strings.Repeat("预", maximumDescriptionRunes+1)
+	fixture := strings.Replace(alertsFixture, "预计白天气温较高。", longText, 1)
+	fixture = strings.Replace(fixture, "https://www.qweather.com/severe-weather/example.html",
+		"https://malicious.example/alert", 1)
+	result, err := parseAlerts([]byte(fixture))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := result.Data.(weather.Alerts)
+	if data.DetailURL != "" || !data.Items[0].ContentTruncated ||
+		len([]rune(data.Items[0].Description)) != maximumDescriptionRunes {
+		t.Fatalf("alert bounds were not applied %#v", data)
+	}
+}
+
+func TestParseAlertsSortsBeforeTruncating(t *testing.T) {
+	warnings := []map[string]string{
+		{"id": "active-minor", "title": "active minor", "type": "minor", "typeName": "Minor",
+			"pubTime": "2026-08-02T10:00+08:00", "status": "active", "severity": "minor"},
+		{"id": "active-extreme", "title": "active extreme", "type": "extreme", "typeName": "Extreme",
+			"pubTime": "2026-08-02T09:00+08:00", "status": "active", "severity": "extreme"},
+		{"id": "unknown-extreme", "title": "unknown extreme", "type": "unknown", "typeName": "Unknown",
+			"pubTime": "2026-08-02T11:00+08:00", "status": "other", "severity": "extreme"},
+		{"id": "cancelled-extreme", "title": "cancelled extreme", "type": "cancelled", "typeName": "Cancelled",
+			"pubTime": "2026-08-02T12:00+08:00", "status": "cancelled", "severity": "extreme"},
+	}
+	for index := 0; index < 29; index++ {
+		warnings = append(warnings, map[string]string{
+			"id": fmt.Sprintf("filler-%02d", index), "title": "filler", "type": "filler",
+			"typeName": "Filler", "pubTime": "2026-08-02T08:00+08:00",
+			"status": "cancelled", "severity": "minor",
+		})
+	}
+	body, err := json.Marshal(map[string]any{
+		"updateTime": "2026-08-02T10:00+08:00",
+		"warning":    warnings,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := parseAlerts(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alerts := result.Data.(weather.Alerts)
+	if !alerts.Truncated || len(alerts.Items) != maximumAlerts {
+		t.Fatalf("unexpected alert truncation %#v", alerts)
+	}
+	want := []string{"active-extreme", "active-minor", "unknown-extreme", "cancelled-extreme"}
+	for index, id := range want {
+		if alerts.Items[index].ID != id {
+			t.Fatalf("alert %d = %q, want %q", index, alerts.Items[index].ID, id)
+		}
+	}
+	for _, alert := range alerts.Items {
+		if alert.ID == "filler-28" {
+			t.Fatal("lowest-priority alert was retained after truncation")
+		}
 	}
 }
 
@@ -280,6 +374,15 @@ func TestClientOpensCircuitOnAuthenticationFailure(t *testing.T) {
 	}
 	if !errors.Is(client.Ready(), ErrCircuitOpen) {
 		t.Fatalf("expected open circuit, got %v", client.Ready())
+	}
+	diagnostics := client.Diagnostics()
+	if diagnostics.Status != "blocked" || diagnostics.BlockedUntil == nil ||
+		!diagnostics.BlockedUntil.Equal(fixedTime.Add(15*time.Minute)) {
+		t.Fatalf("unexpected blocked diagnostics %#v", diagnostics)
+	}
+	fixedTime = fixedTime.Add(15 * time.Minute)
+	if diagnostics = client.Diagnostics(); diagnostics.Status != "ready" || diagnostics.BlockedUntil != nil {
+		t.Fatalf("unexpected recovered diagnostics %#v", diagnostics)
 	}
 }
 

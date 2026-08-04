@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -223,6 +225,195 @@ func parseDaily(body []byte) (weather.ProviderResult, error) {
 		days = append(days, day)
 	}
 	return weather.ProviderResult{UpdatedAt: updatedAt, Data: weather.Daily{Days: days}}, nil
+}
+
+const (
+	maximumAlerts           = 32
+	maximumAlertIDRunes     = 128
+	maximumAlertTitleRunes  = 256
+	maximumAlertFieldRunes  = 128
+	maximumDescriptionRunes = 8192
+	maximumInstructionRunes = 4096
+)
+
+func parseAlerts(body []byte) (weather.ProviderResult, error) {
+	var raw alertsResponse
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return weather.ProviderResult{}, fmt.Errorf("decode weather alerts: %w", err)
+	}
+	updatedAt, err := parseTime(raw.UpdateTime, "updateTime")
+	if err != nil {
+		return weather.ProviderResult{}, err
+	}
+	items := make([]weather.Alert, 0, len(raw.Warning))
+	for index, item := range raw.Warning {
+		field := func(name string) string { return fmt.Sprintf("warning[%d].%s", index, name) }
+		alert := weather.Alert{}
+		var truncated bool
+		alert.ID, truncated = boundedText(item.ID, maximumAlertIDRunes)
+		alert.ContentTruncated = truncated
+		alert.Title, truncated = boundedText(item.Title, maximumAlertTitleRunes)
+		alert.ContentTruncated = alert.ContentTruncated || truncated
+		authority := item.SenderName
+		if strings.TrimSpace(authority) == "" {
+			authority = item.Sender
+		}
+		alert.IssuingAuthority, truncated = boundedText(authority, maximumAlertFieldRunes)
+		alert.ContentTruncated = alert.ContentTruncated || truncated
+		alert.TypeCode, truncated = boundedText(item.TypeCode, maximumAlertFieldRunes)
+		alert.ContentTruncated = alert.ContentTruncated || truncated
+		alert.TypeName, truncated = boundedText(item.TypeName, maximumAlertFieldRunes)
+		alert.ContentTruncated = alert.ContentTruncated || truncated
+		alert.Description, truncated = boundedText(item.Text, maximumDescriptionRunes)
+		alert.ContentTruncated = alert.ContentTruncated || truncated
+		alert.Instruction, truncated = boundedText(item.Instruction, maximumInstructionRunes)
+		alert.ContentTruncated = alert.ContentTruncated || truncated
+		if alert.ID == "" || alert.Title == "" || alert.TypeCode == "" || alert.TypeName == "" {
+			return weather.ProviderResult{}, fmt.Errorf("%s: required identity is missing", field("identity"))
+		}
+		if alert.IssuedAt, err = parseTime(item.PublishedAt, field("pubTime")); err != nil {
+			return weather.ProviderResult{}, err
+		}
+		alert.IssuedAt = alert.IssuedAt.UTC()
+		if alert.StartsAt, err = parseOptionalTime(item.StartsAt, field("startTime")); err != nil {
+			return weather.ProviderResult{}, err
+		}
+		if alert.EndsAt, err = parseOptionalTime(item.EndsAt, field("endTime")); err != nil {
+			return weather.ProviderResult{}, err
+		}
+		alert.Severity = normalizeSeverity(item.Severity, item.Level)
+		alert.Status = normalizeStatus(item.Status)
+		alert.Urgency = normalizeCAPValue(item.Urgency,
+			"future", "expected", "immediate", "past")
+		alert.Certainty = normalizeCAPValue(item.Certainty,
+			"unlikely", "possible", "likely", "observed")
+		items = append(items, alert)
+	}
+	sort.SliceStable(items, func(left, right int) bool {
+		if statusPriority(items[left].Status) != statusPriority(items[right].Status) {
+			return statusPriority(items[left].Status) > statusPriority(items[right].Status)
+		}
+		if severityPriority(items[left].Severity) != severityPriority(items[right].Severity) {
+			return severityPriority(items[left].Severity) > severityPriority(items[right].Severity)
+		}
+		if !items[left].IssuedAt.Equal(items[right].IssuedAt) {
+			return items[left].IssuedAt.After(items[right].IssuedAt)
+		}
+		return items[left].ID < items[right].ID
+	})
+	truncated := len(items) > maximumAlerts
+	if truncated {
+		items = items[:maximumAlerts]
+	}
+	return weather.ProviderResult{UpdatedAt: updatedAt.UTC(), Data: weather.Alerts{
+		DetailURL: qweatherDetailURL(raw.FXLink), Truncated: truncated, Items: items,
+	}}, nil
+}
+
+func parseOptionalTime(value, field string) (*time.Time, error) {
+	if strings.TrimSpace(value) == "" {
+		return nil, nil
+	}
+	parsed, err := parseTime(value, field)
+	if err != nil {
+		return nil, err
+	}
+	parsed = parsed.UTC()
+	return &parsed, nil
+}
+
+func boundedText(value string, maximum int) (string, bool) {
+	value = strings.TrimSpace(value)
+	runes := []rune(value)
+	if len(runes) <= maximum {
+		return value, false
+	}
+	return string(runes[:maximum]), true
+}
+
+func normalizeSeverity(value, level string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "minor":
+		return "minor"
+	case "moderate":
+		return "moderate"
+	case "severe":
+		return "severe"
+	case "extreme":
+		return "extreme"
+	}
+	switch strings.ToLower(strings.TrimSpace(level)) {
+	case "blue", "蓝色", "蓝":
+		return "minor"
+	case "yellow", "黄色", "黄":
+		return "moderate"
+	case "orange", "橙色", "橙":
+		return "severe"
+	case "red", "红色", "红":
+		return "extreme"
+	default:
+		return "unknown"
+	}
+}
+
+func normalizeStatus(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "active", "预警中", "生效中":
+		return "active"
+	case "cancelled", "canceled", "取消预警", "预警解除", "已解除":
+		return "cancelled"
+	default:
+		return "unknown"
+	}
+}
+
+func normalizeCAPValue(value string, allowed ...string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	for _, candidate := range allowed {
+		if value == candidate {
+			return value
+		}
+	}
+	return "unknown"
+}
+
+func statusPriority(status string) int {
+	switch status {
+	case "active":
+		return 2
+	case "unknown":
+		return 1
+	default:
+		return 0
+	}
+}
+
+func severityPriority(severity string) int {
+	switch severity {
+	case "extreme":
+		return 4
+	case "severe":
+		return 3
+	case "moderate":
+		return 2
+	case "minor":
+		return 1
+	default:
+		return 0
+	}
+}
+
+func qweatherDetailURL(value string) string {
+	parsed, err := url.Parse(strings.TrimSpace(value))
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil {
+		return ""
+	}
+	host := strings.ToLower(parsed.Hostname())
+	if host != "qweather.com" && !strings.HasSuffix(host, ".qweather.com") &&
+		host != "hfx.link" && !strings.HasSuffix(host, ".hfx.link") {
+		return ""
+	}
+	return parsed.String()
 }
 
 func parseTime(value, field string) (time.Time, error) {

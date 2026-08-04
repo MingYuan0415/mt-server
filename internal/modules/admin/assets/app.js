@@ -16,7 +16,8 @@ const errorMessages = {
   admin_origin_limit_reached: "管理域名数量已达到上限。",
   admin_origin_not_found: "该管理域名已不存在，请刷新页面。",
   current_admin_origin: "不能删除当前正在使用的管理域名。",
-  last_admin_origin: "HTTPS 代理模式必须保留至少一个管理域名。"
+  last_admin_origin: "HTTPS 代理模式必须保留至少一个管理域名。",
+  diagnostics_unavailable: "运行诊断暂时不可用。"
 };
 
 function showView(id) {
@@ -253,7 +254,42 @@ async function loadDashboard() {
   const session = await api("/session");
   appState.csrf = session.csrf_token;
   showView("dashboard-view");
-  await Promise.all([loadQWeather(), loadAdminOrigins(), loadTokens(), refreshStatus()]);
+  const diagnostics = loadDiagnostics().catch(error => {
+    showMessage("diagnostics-message", error.message, "error");
+  });
+  await Promise.all([loadQWeather(), loadAdminOrigins(), loadTokens(), refreshStatus(), diagnostics]);
+}
+
+function diagnosticTime(value) {
+  return value ? new Date(value).toLocaleString() : "尚无记录";
+}
+
+async function loadDiagnostics() {
+  const value = await api("/diagnostics");
+  const providerLabels = { ready: "正常", blocked: "暂时阻断", closed: "已关闭", unavailable: "不可用" };
+  let provider = providerLabels[value.provider?.status] || "未知";
+  if (value.provider?.blocked_until) provider += `，至 ${diagnosticTime(value.provider.blocked_until)}`;
+  document.getElementById("diagnostics-provider").textContent = provider;
+  document.getElementById("diagnostics-started").textContent = diagnosticTime(value.runtime_started_at);
+  document.getElementById("diagnostics-success").textContent = diagnosticTime(value.last_success_at);
+  document.getElementById("diagnostics-error").textContent = value.last_error_at
+    ? `${diagnosticTime(value.last_error_at)} · ${value.last_error_class || "unknown"}` : "尚无记录";
+  const labels = { current: "实时天气", hourly: "逐小时", daily: "逐日", alerts: "天气预警" };
+  const body = document.getElementById("diagnostics-kinds");
+  body.replaceChildren();
+  for (const kind of ["current", "hourly", "daily", "alerts"]) {
+    const item = value.kinds?.[kind] || {};
+    const row = document.createElement("tr");
+    for (const text of [labels[kind], item.entries ?? 0, item.requests ?? 0,
+      item.fresh_hits ?? 0, item.stale_hits ?? 0, item.fetch_successes ?? 0,
+      item.fetch_failures ?? 0]) {
+      const cell = document.createElement("td");
+      cell.textContent = text;
+      row.append(cell);
+    }
+    body.append(row);
+  }
+  showMessage("diagnostics-message", `诊断生成于 ${diagnosticTime(value.generated_at)}`);
 }
 
 async function loadQWeather() {
@@ -404,6 +440,13 @@ document.getElementById("setup-origin-input").addEventListener("keydown", event 
   if (event.key === "Enter") { event.preventDefault(); addSetupOrigin(); }
 });
 document.getElementById("qweather-test-browser-location").addEventListener("click", () => useBrowserLocation(document.getElementById("qweather-form"), "qweather-message"));
+document.getElementById("refresh-diagnostics").addEventListener("click", async event => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  try { await loadDiagnostics(); }
+  catch (error) { showMessage("diagnostics-message", error.message, "error"); }
+  finally { button.disabled = false; }
+});
 
 async function qweatherPayload(form) {
   return {

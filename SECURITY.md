@@ -14,7 +14,7 @@ The repository must never contain device tokens, QWeather private keys, persiste
 
 The server intentionally does not log client IPs, geolocation coordinates, Authorization headers, JWTs, or secret values.
 
-`state.json` contains the QWeather private key in plaintext with mode `0600`. Encryption with a key stored beside the file would not improve the host-compromise boundary, so deployments must protect and encrypt backups of the complete state volume. Device tokens are stored only as SHA-256 verifiers and cannot be recovered.
+`state.json` contains the QWeather private key in plaintext with mode `0600`. A v3-to-v4 migration also retains `state.v3.backup.json` with the same permissions so a v0.2 rollback remains possible. Encryption with a key stored beside these files would not improve the host-compromise boundary, so deployments must protect and encrypt backups of the complete state volume. Device tokens are stored only as SHA-256 verifiers and cannot be recovered.
 
 The LAN Compose template permits management credentials over HTTP and is only suitable for a trusted, firewalled network. Any public or untrusted-network deployment must use HTTPS and set `MT_ADMIN_ALLOW_INSECURE_HTTP=false`.
 
@@ -23,5 +23,7 @@ Authenticated weather requests include a declared coarse location. The server ac
 When TLS terminates at a reverse proxy, set `MT_ADMIN_BEHIND_HTTPS_PROXY=true` and keep `MT_ADMIN_ALLOW_INSECURE_HTTP=false`. Setup records the current browser-facing HTTPS Origin in private state, and authenticated administrators can maintain up to 16 origins without restarting the service. The allowlist is intentionally independent of the internal source `Host`. The server ignores `Forwarded`, `X-Forwarded-Host`, and `X-Forwarded-Proto`; the source port must be reachable only from the trusted proxy.
 
 The current management Origin cannot be removed through the web interface. Add and verify a replacement first, sign in through it, and then remove the old Origin. Removing an Origin clears every administrator session. Offline recovery commands require the server to be stopped and acquire the same exclusive state-directory lock as the server process.
+
+Authenticated runtime diagnostics deliberately expose only process-local provider state and counters grouped by weather data kind. They do not contain raw errors, device identities, token metadata, locations, cache keys, coordinates, or client addresses.
 
 An uninitialized instance accepts the first same-origin setup submission without a separate setup credential. Keep it behind a firewall or upstream access policy until initialization succeeds. CSRF protection prevents cross-origin browser submission but is not an authorization boundary for another client that can directly reach the service.

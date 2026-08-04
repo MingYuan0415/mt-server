@@ -13,7 +13,7 @@ docker compose -f deploy/compose.lan.yaml up -d
 
 打开 `http://<NAS地址>:8080/admin/`。初始化页面要求管理员密码、QWeather 账户专属 API Host、Project ID、Credential ID、Ed25519 PKCS#8 私钥、一次性测试坐标和首个设备名称。
 
-临时测试坐标只用于本次 QWeather 实时验证，不写入状态或天气缓存。测试成功后页面显示归一化的当前天气；生成的设备 Bearer token 只显示一次。
+临时测试坐标只用于本次 QWeather 实时天气和预警验证，不写入状态或天气缓存。测试成功后页面显示归一化的当前天气；生成的设备 Bearer token 只显示一次。
 
 ## Caddy HTTPS 模板
 
@@ -59,12 +59,13 @@ MT_PUBLIC_HOST=api.example.com docker compose -f deploy/compose.https.yaml start
 
 ## 天气 API 请求
 
-三个天气端点均使用 GET 和 Bearer 鉴权：
+四个天气端点均使用 GET 和 Bearer 鉴权：
 
 ```text
 GET /api/v1/weather/current
 GET /api/v1/weather/hourly
 GET /api/v1/weather/daily
+GET /api/v1/weather/alerts
 ```
 
 鉴权通过后，服务只解析以下固定请求头：
@@ -82,6 +83,8 @@ X-MT-Location-Timezone   (可选)
 纬度、经度和 Provider 必填。服务校验坐标范围、有限值、Provider 格式和可选元数据，并将坐标归一化到 `0.1` 度网格。缺少必填头返回 `400 location_required`，非法内容返回 `400 invalid_location`；两种情况都不会调用 QWeather。
 
 服务不读取 `RemoteAddr`、`X-Forwarded-For`、查询参数或其他位置头。响应只返回当前请求的可选显示元数据、`source: "device"`、Provider 和 `precision: "city"`，不返回坐标或 IP。相同网格共享天气数据缓存，但显示元数据不进入缓存。
+
+预警响应是同一位置的完整快照，设备应替换旧列表而不是按 ID 增量合并。空列表表示当前无预警；`truncated=true` 表示上游条目超过公开上限。预警默认新鲜 10 分钟，发生上游故障时最多返回 1 小时内且带 `stale=true` 的缓存。
 
 ## 设备令牌轮换
 
@@ -101,15 +104,26 @@ curl http://127.0.0.1:8080/health/ready
 - QWeather 认证熔断：live 为 200，ready 为 503；已有缓存允许时仍可返回 `stale=true`。
 - 状态目录同步未确认：写操作仍成功并返回 `X-MT-State-Warning: durability_unconfirmed`，管理概览持续显示告警；检查状态卷后执行下一次管理写入以重新确认。
 
-管理页面更新 QWeather 时会先真实请求实时天气。验证或写盘失败不会替换原配置。日志只记录事件类别、请求 ID、路径和安全错误，不记录请求体、IP、坐标、位置元数据或凭据。
+管理页面更新 QWeather 时会先真实请求实时天气和预警接口。任一验证或写盘失败都不会替换原配置。管理概览的运行诊断只显示供应商状态和按数据种类聚合的内存缓存计数；日志只记录事件类别、请求 ID、路径和安全错误，不记录请求体、IP、坐标、位置元数据或凭据。
 
 ## 备份、升级与回滚
 
 - `mt-server-state` 卷包含明文 QWeather 私钥和管理员验证器，必须使用加密备份并限制读取权限。
 - 仅部署语义化版本标签或镜像 digest，禁止使用 `latest`。
-- v0.2.0 使用 state schema v3，不迁移 v0.1.x 的 schema v2。升级前必须加密备份 `mt-server-state`，停止服务并仅删除 mt-server 状态卷；不得删除 Caddy 的 `caddy-data` 或 `caddy-config` 卷。启动 v0.2.0 后通过管理网页重新配置管理员、管理域名、QWeather 和设备令牌。
-- 以后升级前备份状态卷，更新固定镜像版本后观察 `/health/ready`、容器重启次数和最近日志。
-- v0.1.x 无法读取 schema v3；回滚旧镜像前必须恢复升级前的 schema v2 状态卷备份。
+- v0.3.0 使用 state schema v4。升级前仍必须加密备份 `mt-server-state`；首次读取 v0.2.x 的 schema v3 时，服务会完整校验并自动迁移，同时以 `0600` 权限保留 `state.v3.backup.json`。
+- schema v2 不自动迁移。v0.1.x 部署必须继续按 v0.2.0 文档先备份并重新初始化，不能跳过缺失的管理 Origin 信任信息。
+- 升级后观察 `/health/ready`、容器重启次数、管理概览诊断和最近日志。迁移前备份含完整 QWeather 私钥，不得下载到不受保护的位置或通过网页公开。
+- 回滚 v0.2.0 前，先停止 v0.3.0，使用 v0.3.0 镜像和同一状态卷执行 `mt-server state restore-v3-backup`，再把镜像固定为 v0.2.0 后启动。恢复会丢弃迁移后产生的管理配置变更，应优先保留完整加密卷备份。
+
+HTTPS Compose 回滚示例：
+
+```sh
+MT_PUBLIC_HOST=api.example.com docker compose -f deploy/compose.https.yaml stop mt-server
+MT_PUBLIC_HOST=api.example.com docker compose -f deploy/compose.https.yaml run --rm --no-deps mt-server \
+  state restore-v3-backup
+MT_SERVER_IMAGE=ghcr.io/mingyuan0415/mt-server:v0.2.0 \
+  MT_PUBLIC_HOST=api.example.com docker compose -f deploy/compose.https.yaml up -d
+```
 
 HTTPS 模板重置旧状态时，先停止整套服务并查询精确卷名，再只删除带 `com.docker.compose.volume=mt-server-state` 标签的卷：
 

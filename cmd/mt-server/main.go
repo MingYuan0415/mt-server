@@ -31,6 +31,12 @@ func main() {
 				os.Exit(1)
 			}
 			return
+		case "state":
+			if err := runState(os.Args[2:]); err != nil {
+				_, _ = fmt.Fprintln(os.Stderr, "state error:", err)
+				os.Exit(1)
+			}
+			return
 		default:
 			_, _ = fmt.Fprintln(os.Stderr, "unknown command")
 			os.Exit(2)

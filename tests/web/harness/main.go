@@ -90,6 +90,23 @@ func (r *runtime) Ready() error {
 	return nil
 }
 
+func (r *runtime) Diagnostics() (weather.Diagnostics, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.ready {
+		return weather.Diagnostics{}, errors.New("setup required")
+	}
+	now := time.Date(2026, 8, 2, 2, 0, 0, 0, time.UTC)
+	return weather.Diagnostics{
+		GeneratedAt: now, RuntimeStarted: now.Add(-time.Hour),
+		Provider: weather.ProviderDiagnostics{Status: "ready"},
+		Kinds: map[weather.Kind]weather.KindDiagnostics{
+			weather.KindCurrent: {}, weather.KindHourly: {},
+			weather.KindDaily: {}, weather.KindAlerts: {},
+		},
+	}, nil
+}
+
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	store, err := state.NewStore(os.Getenv("MT_STATE_DIR"))

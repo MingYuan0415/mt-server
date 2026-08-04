@@ -122,6 +122,8 @@ func TestModuleExposesAllWeatherDatasets(t *testing.T) {
 			return ProviderResult{UpdatedAt: now, Data: Hourly{Hours: []Hour{{ForecastAt: now}}}}, nil
 		case KindDaily:
 			return ProviderResult{UpdatedAt: now, Data: Daily{Days: []Day{{Date: "2026-08-02"}}}}, nil
+		case KindAlerts:
+			return ProviderResult{UpdatedAt: now, Data: Alerts{Items: []Alert{}}}, nil
 		default:
 			return ProviderResult{}, errors.New("unexpected weather kind")
 		}
@@ -138,6 +140,7 @@ func TestModuleExposesAllWeatherDatasets(t *testing.T) {
 		{path: "/api/v1/weather/current", dataField: "temperature_c"},
 		{path: "/api/v1/weather/hourly", dataField: "hours"},
 		{path: "/api/v1/weather/daily", dataField: "days"},
+		{path: "/api/v1/weather/alerts", dataField: "items"},
 	} {
 		t.Run(test.path, func(t *testing.T) {
 			recorder := httptest.NewRecorder()
