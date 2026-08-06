@@ -8,14 +8,16 @@ cmd/mt-server
        -> internal/platform/*         状态、鉴权、HTTP、健康与请求位置
        -> internal/modules/admin      管理 API 与嵌入式网页
        -> internal/modules/weather    稳定天气模型、限速与缓存
+       -> internal/modules/location   设备位置 API
           -> internal/providers/qweather
+          -> internal/providers/geoip GeoLite2 City 本地读取与热重载
 ```
 
 所有模块在编译期显式注册。服务不加载动态插件、不提供任意上游转发，也不依赖数据库或外部缓存。供应商原始响应只存在于适配层。
 
 ## 初始化与状态
 
-进程启动只读取监听地址、日志级别、状态目录和管理传输策略。若 `state.json` 不存在，服务进入 `setup_required`，管理页面仍可使用，设备天气接口返回 `service_unconfigured`。
+进程启动只读取监听地址、日志级别、状态目录、管理传输策略，以及可选的 GeoLite2 数据库路径与可信客户端 IP 配置（均为环境变量，不写入状态）。若 `state.json` 不存在，服务进入 `setup_required`，管理页面仍可使用，设备天气接口返回 `service_unconfigured`。
 
 网页提交完整配置时必须通过同源、CSRF 和全局限速校验。QWeather 实时验证必须带一次性浏览器测试位置；验证成功后才以 `0600` 权限原子创建状态。临时位置不持久化，也不进入天气缓存。
 
@@ -27,16 +29,21 @@ schema v4 状态包含 Argon2id 管理员验证器、管理 HTTPS Origin、QWeat
 
 ```text
 Bearer 认证
-  -> 解析 X-MT-Location-* 请求头
+  -> 解析 X-MT-Location-* 请求头（全有或全无）
+  -> 无位置头时按可信客户端 IP 推断位置
   -> 校验并归一化到 0.1 度网格
   -> 按 DeviceID 限制位置网格跳变
   -> 查询或命中 QWeather 缓存
   -> 返回当前请求的显示元数据，不返回坐标或 IP
 ```
 
-纬度、经度和位置来源标识必填；城市、地区、国家和时区可选。服务器不读取连接来源 IP、`X-Forwarded-For`、代理位置头或查询参数，也不发起位置解析网络请求。
+纬度、经度和位置来源标识需要同时提供或同时省略；只提供一部分按客户端错误处理。城市、地区、国家和时区可选。服务器不读取任意转发头（如 `X-Forwarded-For`）、代理位置头或查询参数，也不发起位置解析网络请求；未配置可信客户端 IP 头时，IP 推断使用直连对端地址，该地址从不记录或返回。
+
+省略位置头时，若进程配置了 `MT_GEOIP_DB`，`internal/providers/geoip` 会查询本地 GeoLite2 City 数据库，返回 `source: "ip"`、`precision: "coarse"` 的归一化点；该结果只存在内存，不落盘。可信客户端 IP 头是可选配置：配置 `MT_TRUSTED_CLIENT_IP_HEADER` 与 `MT_TRUSTED_CLIENT_IP_NETS` 时，客户端 IP 只从网段内直连代理提供的该头读取，其余请求使用连接对端地址；头值严格解析为单个 IP，多值或非法值直接拒绝。未配置可信头时使用直连对端地址，该地址从不记录或返回。私有、环回、链路本地、CGNAT 和特殊用途网段不可定位。MMDB 文件由外部 `geoipupdate` 原子替换，Store 每 5 分钟检测文件变化并热重载。
 
 Bearer token 持有者可以声明任意合法位置。每个 DeviceID 的位置变更令牌桶容量为 4，每 5 分钟恢复 1 次；同一网格不计数，超限返回 `429`。内存 LRU 最多保存 64 个位置，天气数据按网格、种类、语言和单位隔离；显示元数据始终来自当前请求，不跨请求缓存。
+
+`GET /api/v1/location` 使用同一位置解析逻辑，返回城市、地区、国家、时区和可选 `accuracy_radius_km`，不返回 IP 或坐标。天气接口在推断不可用时返回 `503 location_unavailable`。
 
 ## 动态运行时
 

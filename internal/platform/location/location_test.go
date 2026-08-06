@@ -22,7 +22,7 @@ func TestFromRequestParsesAndNormalizesDeviceLocation(t *testing.T) {
 	request.Header.Set("CF-IPLatitude", "31.2304")
 	request.Header.Set("X-Forwarded-For", "192.0.2.1")
 
-	point, err := FromRequest(request)
+	point, _, err := FromRequest(request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,10 +37,21 @@ func TestFromRequestRequiresCoordinatesAndProvider(t *testing.T) {
 		t.Run(missing, func(t *testing.T) {
 			request := validRequest()
 			request.Header.Del(missing)
-			if _, err := FromRequest(request); !errors.Is(err, ErrRequired) {
-				t.Fatalf("expected required error, got %v", err)
+			if _, _, err := FromRequest(request); !errors.Is(err, ErrPartial) {
+				t.Fatalf("expected partial error, got %v", err)
 			}
 		})
+	}
+}
+
+func TestFromRequestAllowsAllHeadersAbsent(t *testing.T) {
+	request := httptest.NewRequest("GET", "https://api.example.com/", nil)
+	if _, explicit, err := FromRequest(request); err != nil || explicit {
+		t.Fatalf("expected non-explicit absence, got %v %v", explicit, err)
+	}
+	request.Header.Set(HeaderCity, "City without coordinates")
+	if _, explicit, err := FromRequest(request); err != nil || explicit {
+		t.Fatalf("optional metadata alone must not trigger location parsing: %v %v", explicit, err)
 	}
 }
 
@@ -64,7 +75,7 @@ func TestFromRequestRejectsInvalidValues(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			request := validRequest()
 			request.Header.Set(test.header, test.value)
-			if _, err := FromRequest(request); !errors.Is(err, ErrInvalid) {
+			if _, _, err := FromRequest(request); !errors.Is(err, ErrInvalid) {
 				t.Fatalf("expected invalid error, got %v", err)
 			}
 		})
@@ -72,7 +83,7 @@ func TestFromRequestRejectsInvalidValues(t *testing.T) {
 
 	request := validRequest()
 	request.Header[http.CanonicalHeaderKey(HeaderCity)] = []string{string([]byte{0xff})}
-	if _, err := FromRequest(request); !errors.Is(err, ErrInvalid) {
+	if _, _, err := FromRequest(request); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("expected invalid UTF-8 error, got %v", err)
 	}
 }

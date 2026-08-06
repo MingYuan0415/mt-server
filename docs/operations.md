@@ -34,7 +34,7 @@ Caddy 与源站只通过内部 Docker 网络通信，源站不发布宿主端口
 - 设置 `MT_ADMIN_ALLOW_INSECURE_HTTP=false` 和 `MT_ADMIN_BEHIND_HTTPS_PROXY=true`。
 - 通过公开 HTTPS 域名打开初始化页面；当前 Origin 会自动加入候选列表。
 - 保留天气请求中的 `Authorization` 和 `X-MT-Location-*` 请求头。
-- 不需要转发 `X-Forwarded-For` 或任何代理地理位置头；服务不会读取它们。
+- 需要 IP 推断时，按“IP 位置推断”一节配置可信客户端 IP 头与网段；否则不需要转发 `X-Forwarded-For` 或任何代理地理位置头。
 
 Origin 必须是完整 HTTPS Origin，可包含 IPv4、带方括号的 IPv6 和非默认端口；主机名大小写及默认 `:443` 会被规范化。路径、查询、片段、用户信息、HTTP 和重复项会被拒绝。Cloudflare Tunnel 与其他代理不需要覆盖源站 `Host`；服务不会读取 `Forwarded`、`X-Forwarded-Host` 或 `X-Forwarded-Proto`。
 
@@ -59,13 +59,14 @@ MT_PUBLIC_HOST=api.example.com docker compose -f deploy/compose.https.yaml start
 
 ## 天气 API 请求
 
-四个天气端点均使用 GET 和 Bearer 鉴权：
+五个端点均使用 GET 和 Bearer 鉴权：
 
 ```text
 GET /api/v1/weather/current
 GET /api/v1/weather/hourly
 GET /api/v1/weather/daily
 GET /api/v1/weather/alerts
+GET /api/v1/location
 ```
 
 鉴权通过后，服务只解析以下固定请求头：
@@ -80,11 +81,45 @@ X-MT-Location-Country    (可选)
 X-MT-Location-Timezone   (可选)
 ```
 
-纬度、经度和 Provider 必填。服务校验坐标范围、有限值、Provider 格式和可选元数据，并将坐标归一化到 `0.1` 度网格。缺少必填头返回 `400 location_required`，非法内容返回 `400 invalid_location`；两种情况都不会调用 QWeather。
+纬度、经度和 Provider 需要同时提供或同时省略。提供时，服务校验坐标范围、有限值、Provider 格式和可选元数据，并将坐标归一化到 `0.1` 度网格；只提供其中一部分返回 `400 invalid_location`。省略时启用 IP 推断（见下节），推断不可用返回 `503 location_unavailable`；未配置 GeoLite2 推断时，天气接口对无位置头请求返回 `400 location_required`，`GET /api/v1/location` 返回 `503 location_unavailable`。以上情况都不会调用 QWeather。
 
-服务不读取 `RemoteAddr`、`X-Forwarded-For`、查询参数或其他位置头。响应只返回当前请求的可选显示元数据、`source: "device"`、Provider 和 `precision: "city"`，不返回坐标或 IP。相同网格共享天气数据缓存，但显示元数据不进入缓存。
+服务不读取任意转发头（如 `X-Forwarded-For`）、查询参数或其他位置头；未配置可信客户端 IP 头时，IP 推断使用直连对端地址，该地址从不记录或返回。响应只返回当前请求的可选显示元数据、来源、Provider 和精度，不返回坐标或 IP。相同网格共享天气数据缓存，但显示元数据不进入缓存。`GET /api/v1/location` 返回 `schema_version`、位置元数据和可选 `accuracy_radius_km`，同样不包含 IP 或坐标。
 
 预警响应是同一位置的完整快照，设备应替换旧列表而不是按 ID 增量合并。空列表表示当前无预警；`truncated=true` 表示上游条目超过公开上限。预警默认新鲜 10 分钟，发生上游故障时最多返回 1 小时内且带 `stale=true` 的缓存。
+
+## IP 位置推断
+
+IP 推断使用本地 GeoLite2 City MMDB 文件，只做内存查询，不调用任何在线定位服务。结果代表“公网出口附近的粗略天气区域”，不等于设备真实位置；移动网络、CGNAT、VPN、代理或企业出口会定位到运营商或代理出口。
+
+```yaml
+environment:
+  MT_GEOIP_DB: /var/lib/geoip/GeoLite2-City.mmdb
+  MT_TRUSTED_CLIENT_IP_HEADER: "CF-Connecting-IP"
+  MT_TRUSTED_CLIENT_IP_NETS: "172.30.0.0/16"
+volumes:
+  - geoip-data:/var/lib/geoip:ro
+```
+
+- `MT_TRUSTED_CLIENT_IP_NETS` 必须是直连代理的实际网段（如 Cloudflare Tunnel 容器所在 Docker 子网），且源站端口只能由该代理访问；只有来自这些网段的请求才会读取 `MT_TRUSTED_CLIENT_IP_HEADER`，其余请求使用连接对端地址。
+- `MT_TRUSTED_CLIENT_IP_HEADER` 取单个 IP，多值或非法值直接返回 `location_unavailable`。Cloudflare Tunnel 场景使用 `CF-Connecting-IP`；Caddy 等反代请改用能正确传递原始客户端 IP 的配置并给出精确网段。
+- 设置头但未设置网段会拒绝启动。私有、环回、链路本地、CGNAT 和文档网段不可定位。
+- MMDB 由外部官方 `geoipupdate` 维护：账户凭据放入只对更新任务可见的配置，数据库写入独立私有卷（应用只读挂载）。应用每 5 分钟检测文件替换并热重载，无需重启。
+- GeoLite2 数据受 MaxMind 许可约束，包含署名义务；不要把 MMDB 打包进公开镜像。
+
+示例 sidecar（仅示意，实际应使用官方镜像并妥善保管凭据）：
+
+```yaml
+  geoipupdate:
+    image: maxmindinc/geoipupdate:latest
+    restart: unless-stopped
+    environment:
+      GEOIPUPDATE_ACCOUNT_ID: "${MAXMIND_ACCOUNT_ID}"
+      GEOIPUPDATE_LICENSE_KEY: "${MAXMIND_LICENSE_KEY}"
+      GEOIPUPDATE_EDITION_IDS: "GeoLite2-City"
+      GEOIPUPDATE_FREQUENCY: "24"
+    volumes:
+      - geoip-data:/usr/share/GeoIP
+```
 
 ## 设备令牌轮换
 
@@ -99,7 +134,9 @@ curl http://127.0.0.1:8080/health/ready
 
 - 未初始化：live 为 200，ready 为 503 且模块状态为 `setup_required`。
 - 正常配置：live 和 ready 均为 200。
-- 缺少或非法请求位置：天气接口返回 400，不调用 QWeather。
+- 部分或非法请求位置：天气接口返回 400，不调用 QWeather。
+- 省略位置头且未配置推断：天气接口返回 400 `location_required`，`/api/v1/location` 返回 503 `location_unavailable`。
+- 省略位置头且已配置推断但推断不可用：天气接口与 `/api/v1/location` 均返回 503 `location_unavailable`。
 - 位置切换过快：天气接口返回 429，并附带 `Retry-After`。
 - QWeather 认证熔断：live 为 200，ready 为 503；已有缓存允许时仍可返回 `stale=true`。
 - 状态目录同步未确认：写操作仍成功并返回 `X-MT-State-Warning: durability_unconfirmed`，管理概览持续显示告警；检查状态卷后执行下一次管理写入以重新确认。

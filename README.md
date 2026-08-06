@@ -11,6 +11,7 @@
 - 提供实时天气、24 小时逐小时预报、7 天逐日预报和天气预警。
 - 使用 Bearer token 鉴权，支持最多 32 个命名令牌、重叠轮换和撤销。
 - 校验请求位置并归一化到 `0.1` 度网格，不记录或返回坐标和客户端 IP。
+- 可选 GeoLite2 City 本地 IP 推断：设备省略位置头时按公网出口位置查询天气，并提供 `/api/v1/location` 返回粗粒度城市元数据。
 - 按位置网格隔离 LRU 内存缓存，支持并发刷新合并和陈旧数据降级。
 - 按鉴权主体限制短时间位置跳变，保护上游配额。
 - 使用 Argon2id 管理员密码、内存 session、同源校验、CSRF 和全局登录限速。
@@ -62,9 +63,10 @@ GET /api/v1/weather/current
 GET /api/v1/weather/hourly
 GET /api/v1/weather/daily
 GET /api/v1/weather/alerts
+GET /api/v1/location
 ```
 
-每个请求需要设备 Bearer token，以及纬度、经度和位置来源标识。城市、地区、国家和时区为可选显示元数据：
+每个天气请求需要设备 Bearer token。设备可携带完整的固定位置头（城市、地区、国家和时区为可选显示元数据）：
 
 ```sh
 curl https://api.example.com/api/v1/weather/current \
@@ -78,9 +80,13 @@ curl https://api.example.com/api/v1/weather/current \
   -H 'X-MT-Location-Timezone: Etc/UTC'
 ```
 
-服务先完成鉴权，再解析位置头。坐标必须有限且在合法范围内；来源标识必须匹配 `[a-z0-9][a-z0-9._-]{0,31}`；可选元数据必须为合法 UTF-8、无控制字符且不超过 128 个字符。服务不读取客户端地址、`X-Forwarded-For`、查询参数或代理位置头，也不会发起位置解析请求。
+服务先完成鉴权，再解析位置头。坐标必须有限且在合法范围内；来源标识必须匹配 `[a-z0-9][a-z0-9._-]{0,31}`；可选元数据必须为合法 UTF-8、无控制字符且不超过 128 个字符。服务不读取任意转发头或查询参数；未配置可信客户端 IP 头时，IP 推断使用直连对端地址，该地址从不记录或返回。
 
-缺少必填位置头返回 `400 location_required`，非法内容返回 `400 invalid_location`，位置变化超限返回 `429 location_rate_limited`。完整请求、响应和错误契约见 [`api/openapi.json`](api/openapi.json)。
+位置头必须同时提供或同时省略：只提供其中一部分会返回 `400 invalid_location`。省略全部位置头时，如果部署配置了 GeoLite2 数据库，服务会根据设备公网出口 IP 推断粗粒度位置（`source: "ip"`、`precision: "coarse"`），并照常归一化、限速和缓存；可信客户端 IP 头为可选配置，未配置时使用直连对端地址（隧道部署建议配置以获取真实公网 IP）。推断不可用时返回 `503 location_unavailable`；未配置 GeoLite2 推断时，天气接口对无位置头请求返回 `400 location_required`，`/api/v1/location` 返回 `503 location_unavailable`。
+
+`GET /api/v1/location` 返回将用于天气请求的位置（显式头优先，否则为 IP 推断结果），只包含城市、地区、国家、时区、来源、提供方、精度和可选 `accuracy_radius_km`，从不返回 IP 或坐标。设备可在无 GPS 时用该端点获取自身所在城市，再决定是否需要显式位置头。
+
+天气接口在缺少全部位置头且未配置推断时返回 `400 location_required`，非法内容返回 `400 invalid_location`，位置变化超限返回 `429 location_rate_limited`；`/api/v1/location` 对无位置头且无推断请求返回 `503 location_unavailable`。完整请求、响应和错误契约见 [`api/openapi.json`](api/openapi.json)。
 
 预警端点返回当前位置的完整预警快照；空数组表示当前没有预警。客户端应以每次响应替换同一位置的旧快照。预警默认缓存 10 分钟，上游故障时最多返回 1 小时内的陈旧快照，并通过 `stale` 明确标记。
 
@@ -93,10 +99,15 @@ curl https://api.example.com/api/v1/weather/current \
 | `MT_STATE_DIR` | `/var/lib/mt-server` | 必须为绝对路径的可写状态目录 |
 | `MT_ADMIN_ALLOW_INSECURE_HTTP` | `false` | 仅在受信 LAN 中允许 HTTP 管理写操作 |
 | `MT_ADMIN_BEHIND_HTTPS_PROXY` | `false` | 明确声明管理入口始终由受信 HTTPS 代理提供 |
+| `MT_GEOIP_DB` | 空 | GeoLite2 City MMDB 文件路径；设置后启用 IP 位置推断 |
+| `MT_TRUSTED_CLIENT_IP_HEADER` | 空 | 从受信代理读取客户端 IP 的请求头（如 `CF-Connecting-IP`） |
+| `MT_TRUSTED_CLIENT_IP_NETS` | 空 | 可提供客户端 IP 头的代理网段（逗号分隔的 CIDR） |
 
 两个管理传输开关不能同时启用。HTTPS 代理模式的域名列表保存在私有状态中，由初始化页和“管理域名”页面维护；服务直接匹配浏览器 `Origin`，不信任 `Forwarded`、`X-Forwarded-Host` 或 `X-Forwarded-Proto`。代理必须确保源站只允许代理访问。
 
-QWeather 私钥、管理员密码验证器、管理域名、缓存策略和设备令牌哈希保存在状态卷中。请求位置只用于单次请求、网格限速和内存缓存键，不写入持久状态。
+IP 推断只信任 `MT_TRUSTED_CLIENT_IP_NETS` 中直连代理提供的 `MT_TRUSTED_CLIENT_IP_HEADER` 值，其余请求一律使用连接对端地址。设置头但未设置网段会拒绝启动。公网 IP 推断是“网络出口附近的粗略天气区域”，不等于设备真实位置；移动网络、CGNAT、VPN 会定位到运营商或代理出口。MMDB 由外部 `geoipupdate` 写入私有卷，应用只读并检测替换后热加载，密钥不进入镜像、仓库或应用日志。
+
+QWeather 私钥、管理员密码验证器、管理域名、缓存策略和设备令牌哈希保存在状态卷中。请求位置只用于单次请求、网格限速和内存缓存键，不写入持久状态；IP 推断结果同样不落盘，客户端 IP 和坐标从不记录或返回。
 
 ## 开发与验证
 

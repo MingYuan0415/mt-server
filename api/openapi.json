@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "mt-server weather API",
-    "version": "1.1.0",
-    "description": "Versioned authenticated weather API implemented by mt-server. Weather data is provided by QWeather."
+    "version": "1.2.0",
+    "description": "Versioned authenticated weather and location API implemented by mt-server. Weather data is provided by QWeather. When the device location headers are absent, the server may infer a coarse location from the client's public IP address."
   },
   "servers": [
     { "url": "https://api.example.com" }
@@ -157,6 +157,37 @@
         }
       }
     },
+    "/api/v1/location": {
+      "get": {
+        "summary": "Get the device's effective location",
+        "operationId": "getDeviceLocation",
+        "security": [{ "bearerAuth": [] }],
+        "description": "Returns the display-safe location that will be used for weather requests. The optional location headers win when provided in full; otherwise the location is inferred from the authenticated client's public IP when the deployment has IP inference enabled. The response never contains the client IP or coordinates.",
+        "parameters": [
+          { "$ref": "#/components/parameters/LocationLatitude" },
+          { "$ref": "#/components/parameters/LocationLongitude" },
+          { "$ref": "#/components/parameters/LocationProvider" },
+          { "$ref": "#/components/parameters/LocationCity" },
+          { "$ref": "#/components/parameters/LocationRegion" },
+          { "$ref": "#/components/parameters/LocationCountry" },
+          { "$ref": "#/components/parameters/LocationTimezone" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Coarse device location metadata",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/LocationResponse" },
+                "examples": { "default": { "$ref": "#/components/examples/LocationResponse" } }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/InvalidLocation" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
     "/health/live": {
       "get": {
         "summary": "Check process liveness",
@@ -182,18 +213,18 @@
   "components": {
     "parameters": {
       "LocationLatitude": {
-        "name": "X-MT-Location-Latitude", "in": "header", "required": true,
-        "description": "Request latitude; validated and normalized by the server to a 0.1 degree grid.",
+        "name": "X-MT-Location-Latitude", "in": "header", "required": false,
+        "description": "Request latitude; validated and normalized by the server to a 0.1 degree grid. All three required headers must be present together; when all are absent the server infers a coarse location from the client IP.",
         "schema": { "type": "string", "maxLength": 32 }
       },
       "LocationLongitude": {
-        "name": "X-MT-Location-Longitude", "in": "header", "required": true,
-        "description": "Request longitude; validated and normalized by the server to a 0.1 degree grid.",
+        "name": "X-MT-Location-Longitude", "in": "header", "required": false,
+        "description": "Request longitude; validated and normalized by the server to a 0.1 degree grid. All three required headers must be present together; when all are absent the server infers a coarse location from the client IP.",
         "schema": { "type": "string", "maxLength": 32 }
       },
       "LocationProvider": {
-        "name": "X-MT-Location-Provider", "in": "header", "required": true,
-        "description": "Lowercase identifier declaring the source of the request location.",
+        "name": "X-MT-Location-Provider", "in": "header", "required": false,
+        "description": "Lowercase identifier declaring the source of the request location. All three required headers must be present together; when all are absent the server infers a coarse location from the client IP.",
         "schema": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,31}$" }
       },
       "LocationCity": {
@@ -221,7 +252,7 @@
     },
     "responses": {
       "InvalidLocation": {
-        "description": "Required device location headers are missing or invalid",
+        "description": "Device location headers are partially provided or invalid; the required headers must be present together or not at all",
         "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
       },
       "LocationRateLimited": {
@@ -414,6 +445,22 @@
             }]
           }
         }
+      },
+      "LocationResponse": {
+        "summary": "IP-inferred device location",
+        "value": {
+          "schema_version": 1,
+          "location": {
+            "city": "Example City",
+            "region": "Example Region",
+            "country": "EX",
+            "timezone": "Etc/UTC",
+            "source": "ip",
+            "provider": "maxmind",
+            "precision": "coarse"
+          },
+          "accuracy_radius_km": 50
+        }
       }
     },
     "schemas": {
@@ -448,9 +495,18 @@
           "region": { "type": "string" },
           "country": { "type": "string" },
           "timezone": { "type": "string" },
-          "source": { "type": "string", "const": "device" },
+          "source": { "type": "string", "enum": ["device", "ip"] },
           "provider": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,31}$" },
-          "precision": { "type": "string", "const": "city" }
+          "precision": { "type": "string", "enum": ["city", "coarse"] }
+        }
+      },
+      "LocationResponse": {
+        "type": "object",
+        "required": ["schema_version", "location"],
+        "properties": {
+          "schema_version": { "type": "integer", "const": 1 },
+          "location": { "$ref": "#/components/schemas/Location" },
+          "accuracy_radius_km": { "type": "integer", "minimum": 1 }
         }
       },
       "CurrentWeather": {

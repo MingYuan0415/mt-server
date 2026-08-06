@@ -30,6 +30,7 @@ func TestOpenAPIContract(t *testing.T) {
 		"/api/v1/weather/alerts",
 	}
 	for _, path := range append(weatherPaths,
+		"/api/v1/location",
 		"/health/live",
 		"/health/ready",
 	) {
@@ -45,15 +46,24 @@ func TestOpenAPIContract(t *testing.T) {
 				t.Errorf("weather path %s has no %s response", path, status)
 			}
 		}
-		parameters := operation["parameters"].([]any)
-		if len(parameters) != 7 {
-			t.Errorf("weather path %s has %d location parameters", path, len(parameters))
-		}
+		checkLocationParameters(t, document, operation["parameters"].([]any), "weather path "+path)
 		content := responses["200"].(map[string]any)["content"].(map[string]any)
 		mediaType := content["application/json"].(map[string]any)
 		if _, ok := mediaType["examples"]; !ok {
 			t.Errorf("weather path %s has no response example", path)
 		}
+	}
+	locationPath := paths["/api/v1/location"].(map[string]any)["get"].(map[string]any)
+	locationResponses := locationPath["responses"].(map[string]any)
+	for _, status := range []string{"200", "400", "401", "503"} {
+		if _, ok := locationResponses[status]; !ok {
+			t.Errorf("location path has no %s response", status)
+		}
+	}
+	if parameters, exists := locationPath["parameters"]; !exists {
+		t.Error("location path must accept the same seven optional location parameters")
+	} else {
+		checkLocationParameters(t, document, parameters.([]any), "location path")
 	}
 	components := document["components"].(map[string]any)
 	parameters := components["parameters"].(map[string]any)
@@ -66,8 +76,8 @@ func TestOpenAPIContract(t *testing.T) {
 		}
 	}
 	examples := components["examples"].(map[string]any)
-	if len(examples) != len(weatherPaths) {
-		t.Fatalf("expected %d weather examples, got %d", len(weatherPaths), len(examples))
+	if len(examples) != len(weatherPaths)+1 {
+		t.Fatalf("expected %d examples, got %d", len(weatherPaths)+1, len(examples))
 	}
 	exampleJSON, err := json.Marshal(examples)
 	if err != nil {
@@ -76,6 +86,7 @@ func TestOpenAPIContract(t *testing.T) {
 	for _, required := range []string{
 		`"id":"qweather"`, `"name":"QWeather"`, "https://www.qweather.com/",
 		`"source":"device"`, `"provider":"example"`, `"truncated":false`,
+		`"source":"ip"`, `"provider":"maxmind"`, `"accuracy_radius_km":50`,
 	} {
 		if !strings.Contains(string(exampleJSON), required) {
 			t.Errorf("OpenAPI examples are missing %q", required)
@@ -177,6 +188,70 @@ func loadDocument(t *testing.T, name string) map[string]any {
 		t.Fatal(err)
 	}
 	return document
+}
+
+// checkLocationParameters resolves parameter $refs and verifies the exact set
+// of seven optional location-header parameters, independent of ordering.
+func checkLocationParameters(t *testing.T, document map[string]any,
+	values []any, label string) {
+	t.Helper()
+	components := document["components"].(map[string]any)["parameters"].(map[string]any)
+	got := make(map[string]bool, len(values))
+	for _, value := range values {
+		entry, ok := value.(map[string]any)
+		if !ok {
+			t.Errorf("%s has a non-object parameter", label)
+			continue
+		}
+		name, in, required, valid := resolveParameter(t, components, entry)
+		if !valid {
+			continue
+		}
+		key := name + "\x00" + in
+		if got[key] {
+			t.Errorf("%s duplicates parameter %s", label, name)
+		}
+		got[key] = true
+		if required {
+			t.Errorf("%s must not require location header %s", label, name)
+		}
+	}
+	expected := []string{
+		"X-MT-Location-Latitude\x00header",
+		"X-MT-Location-Longitude\x00header",
+		"X-MT-Location-Provider\x00header",
+		"X-MT-Location-City\x00header",
+		"X-MT-Location-Region\x00header",
+		"X-MT-Location-Country\x00header",
+		"X-MT-Location-Timezone\x00header",
+	}
+	for _, key := range expected {
+		if !got[key] {
+			t.Errorf("%s is missing location header %q", label, key)
+		}
+	}
+}
+
+func resolveParameter(t *testing.T, components map[string]any,
+	entry map[string]any) (name, in string, required, valid bool) {
+	t.Helper()
+	if reference, ok := entry["$ref"].(string); ok {
+		componentName, found := strings.CutPrefix(reference, "#/components/parameters/")
+		if !found {
+			t.Errorf("invalid parameter reference %q", reference)
+			return "", "", false, false
+		}
+		resolved, exists := components[componentName]
+		if !exists {
+			t.Errorf("referenced parameter %s is missing", componentName)
+			return "", "", false, false
+		}
+		entry = resolved.(map[string]any)
+	}
+	name, _ = entry["name"].(string)
+	in, _ = entry["in"].(string)
+	required = entry["required"] == true
+	return name, in, required, true
 }
 
 func stringSlice(value any) []string {

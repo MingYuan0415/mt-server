@@ -28,8 +28,11 @@ const (
 )
 
 var (
-	// ErrRequired means one or more required device location headers are absent.
+	// ErrRequired means no device location headers are present and no
+	// IP-inference fallback is configured.
 	ErrRequired = errors.New("device location headers are required")
+	// ErrPartial means only some required device location headers are present.
+	ErrPartial = errors.New("device location headers must be provided all together or not at all")
 	// ErrInvalid means the device location headers contain invalid data.
 	ErrInvalid = errors.New("device location headers are invalid")
 
@@ -49,24 +52,31 @@ type Point struct {
 	Precision string
 }
 
-// FromRequest parses the fixed device location header contract.
-func FromRequest(request *http.Request) (Point, error) {
+// FromRequest parses the fixed device location header contract. It returns
+// (point, true, nil) when all required headers are present and valid,
+// (Point{}, false, nil) when none are present so the caller may fall back to
+// IP inference, and an error when only some headers are present or any value
+// is invalid.
+func FromRequest(request *http.Request) (Point, bool, error) {
 	latitude := strings.TrimSpace(request.Header.Get(HeaderLatitude))
 	longitude := strings.TrimSpace(request.Header.Get(HeaderLongitude))
 	provider := strings.TrimSpace(request.Header.Get(HeaderProvider))
+	if latitude == "" && longitude == "" && provider == "" {
+		return Point{}, false, nil
+	}
 	if latitude == "" || longitude == "" || provider == "" {
-		return Point{}, ErrRequired
+		return Point{}, false, ErrPartial
 	}
 	if !providerPattern.MatchString(provider) {
-		return Point{}, ErrInvalid
+		return Point{}, false, ErrInvalid
 	}
 	parsedLatitude, err := parseCoordinate(latitude, -90, 90)
 	if err != nil {
-		return Point{}, ErrInvalid
+		return Point{}, false, ErrInvalid
 	}
 	parsedLongitude, err := parseCoordinate(longitude, -180, 180)
 	if err != nil {
-		return Point{}, ErrInvalid
+		return Point{}, false, ErrInvalid
 	}
 	point, err := Normalize(Point{
 		Latitude:  parsedLatitude,
@@ -80,9 +90,9 @@ func FromRequest(request *http.Request) (Point, error) {
 		Precision: "city",
 	})
 	if err != nil {
-		return Point{}, ErrInvalid
+		return Point{}, false, ErrInvalid
 	}
-	return point, nil
+	return point, true, nil
 }
 
 // CacheKey returns a privacy-reduced location key.

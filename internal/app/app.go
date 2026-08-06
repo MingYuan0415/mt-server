@@ -47,7 +47,8 @@ func New(cfg config.Config, logger *slog.Logger, version string) (*App, error) {
 	}()
 	transport := adminauth.NewTransportPolicy(
 		cfg.AdminAllowInsecureHTTP, cfg.AdminBehindHTTPSProxy)
-	runtime := NewRuntimeManager(logger)
+	runtime := NewRuntimeManager(logger, cfg.GeoIPDBPath,
+		cfg.TrustedClientIPHeader, cfg.TrustedClientIPNets)
 	loaded, err := store.LoadCompatible()
 	if err == nil {
 		persisted := loaded.State

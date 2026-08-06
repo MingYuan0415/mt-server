@@ -55,6 +55,8 @@ func TestLoadRejectsInvalidInfrastructure(t *testing.T) {
 		{name: "relative state", key: "MT_STATE_DIR", value: "state"},
 		{name: "boolean", key: "MT_ADMIN_ALLOW_INSECURE_HTTP", value: "sometimes"},
 		{name: "HTTPS proxy boolean", key: "MT_ADMIN_BEHIND_HTTPS_PROXY", value: "sometimes"},
+		{name: "client IP nets", key: "MT_TRUSTED_CLIENT_IP_NETS", value: "10.0.0.1"},
+		{name: "client IP nets mixed", key: "MT_TRUSTED_CLIENT_IP_NETS", value: "10.0.0.0/8,bad"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			values := map[string]string{test.key: test.value}
@@ -62,5 +64,29 @@ func TestLoadRejectsInvalidInfrastructure(t *testing.T) {
 				t.Fatal("expected configuration error")
 			}
 		})
+	}
+}
+
+func TestLoadGeoIPConfiguration(t *testing.T) {
+	values := map[string]string{
+		"MT_GEOIP_DB":                 "/var/lib/geoip/GeoLite2-City.mmdb",
+		"MT_TRUSTED_CLIENT_IP_HEADER": "CF-Connecting-IP",
+		"MT_TRUSTED_CLIENT_IP_NETS":   "172.30.0.0/16, ::1/128",
+	}
+	value, err := load(func(name string) string { return values[name] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value.GeoIPDBPath != "/var/lib/geoip/GeoLite2-City.mmdb" ||
+		value.TrustedClientIPHeader != "CF-Connecting-IP" ||
+		len(value.TrustedClientIPNets) != 2 {
+		t.Fatalf("unexpected geoip configuration %#v", value)
+	}
+}
+
+func TestLoadRejectsHeaderWithoutTrustedNets(t *testing.T) {
+	values := map[string]string{"MT_TRUSTED_CLIENT_IP_HEADER": "CF-Connecting-IP"}
+	if _, err := load(func(name string) string { return values[name] }); err == nil {
+		t.Fatal("expected header-without-nets rejection")
 	}
 }

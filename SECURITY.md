@@ -8,6 +8,10 @@ Report vulnerabilities privately through GitHub Security Advisories for this rep
 
 Only the latest released minor version receives security fixes. NAS deployments should pin an immutable image digest and update after validation.
 
+## Location Data
+
+The GeoLite2 City database is licensed by MaxMind. Deployments must obtain their own MaxMind account credentials, run the official `geoipupdate` outside the application image, and keep the database and credentials in private volumes. The application never ships with the database and never logs client IPs, inferred coordinates, or cache keys.
+
 ## Secret Handling
 
 The repository must never contain device tokens, QWeather private keys, persistent state, real deployment hostnames, QWeather account identifiers, or real device locations. If any secret reaches Git history, revoke and replace it before rewriting or deleting the exposed file.
@@ -18,9 +22,9 @@ The server intentionally does not log client IPs, geolocation coordinates, Autho
 
 The LAN Compose template permits management credentials over HTTP and is only suitable for a trusted, firewalled network. Any public or untrusted-network deployment must use HTTPS and set `MT_ADMIN_ALLOW_INSECURE_HTTP=false`.
 
-Authenticated weather requests include a declared coarse location. The server accepts only the fixed location-header contract, validates and rounds coordinates, never returns or logs them, and limits rapid grid changes per DeviceID. Possession of a device token still permits choosing arbitrary coordinates and consuming weather quota, so tokens must be independently named, protected, rotated, and revoked when lost.
+Authenticated weather requests either include a declared coarse location or rely on IP inference. The server accepts only the fixed location-header contract (all required headers together or none), validates and rounds coordinates, never returns or logs them, and limits rapid grid changes per DeviceID. IP inference reads a client-IP header only from direct peers in the configured trusted networks and queries a local GeoLite2 City database; it never calls an online geolocation service, and the client IP is never logged or returned. Both the request location and the inferred location exist only in memory for the request, the per-device grid limiter, and cache keys. Possession of a device token still permits choosing arbitrary coordinates and consuming weather quota, so tokens must be independently named, protected, rotated, and revoked when lost.
 
-When TLS terminates at a reverse proxy, set `MT_ADMIN_BEHIND_HTTPS_PROXY=true` and keep `MT_ADMIN_ALLOW_INSECURE_HTTP=false`. Setup records the current browser-facing HTTPS Origin in private state, and authenticated administrators can maintain up to 16 origins without restarting the service. The allowlist is intentionally independent of the internal source `Host`. The server ignores `Forwarded`, `X-Forwarded-Host`, and `X-Forwarded-Proto`; the source port must be reachable only from the trusted proxy.
+When TLS terminates at a reverse proxy, set `MT_ADMIN_BEHIND_HTTPS_PROXY=true` and keep `MT_ADMIN_ALLOW_INSECURE_HTTP=false`. Setup records the current browser-facing HTTPS Origin in private state, and authenticated administrators can maintain up to 16 origins without restarting the service. The allowlist is intentionally independent of the internal source `Host`. The server ignores `Forwarded`, `X-Forwarded-Host`, and `X-Forwarded-Proto`; the source port must be reachable only from the trusted proxy. Client-IP inference likewise requires `MT_TRUSTED_CLIENT_IP_NETS` to be restricted to the direct proxy network; the header is otherwise ignored and `MT_TRUSTED_CLIENT_IP_HEADER` without `MT_TRUSTED_CLIENT_IP_NETS` is rejected at startup.
 
 The current management Origin cannot be removed through the web interface. Add and verify a replacement first, sign in through it, and then remove the old Origin. Removing an Origin clears every administrator session. Offline recovery commands require the server to be stopped and acquire the same exclusive state-directory lock as the server process.
 

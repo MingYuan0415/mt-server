@@ -17,12 +17,14 @@ import (
 type Module struct {
 	service *Service
 	limiter *location.ChangeLimiter
+	source  *location.Source
 	logger  *slog.Logger
 }
 
 // NewModule constructs the weather HTTP module.
-func NewModule(service *Service, limiter *location.ChangeLimiter, logger *slog.Logger) *Module {
-	return &Module{service: service, limiter: limiter, logger: logger}
+func NewModule(service *Service, limiter *location.ChangeLimiter,
+	source *location.Source, logger *slog.Logger) *Module {
+	return &Module{service: service, limiter: limiter, source: source, logger: logger}
 }
 
 // Name returns the health registry name.
@@ -53,15 +55,22 @@ func (m *Module) handle(kind Kind) http.HandlerFunc {
 				"unauthorized", "authentication required")
 			return
 		}
-		point, err := location.FromRequest(r)
+		point, _, err := m.source.EffectivePoint(r)
 		if err != nil {
-			code := "invalid_location"
-			message := "device location headers are invalid"
-			if errors.Is(err, location.ErrRequired) {
-				code = "location_required"
-				message = "device location headers are required"
+			switch {
+			case errors.Is(err, location.ErrPartial):
+				httpapi.WriteError(w, r, http.StatusBadRequest, "invalid_location",
+					"device location headers must be provided all together or not at all")
+			case errors.Is(err, location.ErrInvalid):
+				httpapi.WriteError(w, r, http.StatusBadRequest,
+					"invalid_location", "device location headers are invalid")
+			case errors.Is(err, location.ErrRequired):
+				httpapi.WriteError(w, r, http.StatusBadRequest,
+					"location_required", "device location headers are required")
+			default:
+				httpapi.WriteError(w, r, http.StatusServiceUnavailable,
+					"location_unavailable", "device location could not be determined")
 			}
-			httpapi.WriteError(w, r, http.StatusBadRequest, code, message)
 			return
 		}
 		if allowed, retry := m.limiter.Allow(principal.DeviceID, point.CacheKey()); !allowed {

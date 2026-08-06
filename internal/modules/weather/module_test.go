@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -97,6 +98,18 @@ func TestModuleRejectsMissingAndInvalidLocation(t *testing.T) {
 			missingRecorder.Code, missingRecorder.Body.String())
 	}
 
+	partial := httptest.NewRequest(http.MethodGet,
+		"https://api.example.com/api/v1/weather/current", nil)
+	partial.Header.Set("Authorization", "Bearer "+testDeviceToken)
+	partial.Header.Set(location.HeaderLatitude, "22.5")
+	partialRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(partialRecorder, partial)
+	if partialRecorder.Code != http.StatusBadRequest ||
+		!strings.Contains(partialRecorder.Body.String(), "invalid_location") {
+		t.Fatalf("unexpected partial-location response %d %s",
+			partialRecorder.Code, partialRecorder.Body.String())
+	}
+
 	invalid := deviceRequest("/api/v1/weather/current")
 	invalid.Header.Set(location.HeaderLatitude, "NaN")
 	invalidRecorder := httptest.NewRecorder()
@@ -109,6 +122,81 @@ func TestModuleRejectsMissingAndInvalidLocation(t *testing.T) {
 	if fetches.Load() != 0 {
 		t.Fatalf("invalid locations reached the provider %d times", fetches.Load())
 	}
+}
+
+func TestModuleFallsBackToIPInferenceWithoutHeaders(t *testing.T) {
+	now := time.Date(2026, 8, 2, 0, 0, 0, 0, time.UTC)
+	provider := &fakeProvider{fetch: successfulFetch(now)}
+	service := newTestService(provider, 64)
+	service.now = func() time.Time { return now }
+	defer closeService(t, service)
+	source := location.NewSource(location.NewIPExtractor("", nil), &fakeResolver{
+		resolved: location.Resolved{Point: location.Point{
+			Latitude: 22.5431, Longitude: 114.0579, City: "IP City",
+			Source: "ip", Provider: "maxmind", Precision: "coarse",
+		}},
+	})
+	handler := testDeviceHandlerWithSource(service, 4, source)
+
+	request := httptest.NewRequest(http.MethodGet,
+		"https://api.example.com/api/v1/weather/current", nil)
+	request.Header.Set("Authorization", "Bearer "+testDeviceToken)
+	request.Header.Set("CF-IPLatitude", "31.2304")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var response map[string]any
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	publicLocation := response["location"].(map[string]any)
+	if publicLocation["source"] != "ip" || publicLocation["provider"] != "maxmind" ||
+		publicLocation["precision"] != "coarse" || publicLocation["city"] != "IP City" {
+		t.Fatalf("unexpected IP location %#v", publicLocation)
+	}
+	for _, forbidden := range []string{"latitude", "longitude", "22.5", "114.1"} {
+		if strings.Contains(recorder.Body.String(), forbidden) {
+			t.Fatalf("response leaked %q: %s", forbidden, recorder.Body.String())
+		}
+	}
+}
+
+func TestModuleMapsUnavailableInferenceToServiceUnavailable(t *testing.T) {
+	provider := &fakeProvider{fetch: successfulFetch(time.Now())}
+	service := newTestService(provider, 64)
+	defer closeService(t, service)
+	source := location.NewSource(location.NewIPExtractor("", nil), &fakeResolver{
+		err: location.ErrLocationUnavailable,
+	})
+	handler := testDeviceHandlerWithSource(service, 4, source)
+	request := httptest.NewRequest(http.MethodGet,
+		"https://api.example.com/api/v1/weather/current", nil)
+	request.Header.Set("Authorization", "Bearer "+testDeviceToken)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusServiceUnavailable ||
+		!strings.Contains(recorder.Body.String(), "location_unavailable") {
+		t.Fatalf("unexpected unavailable response %d %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+type fakeResolver struct {
+	resolved location.Resolved
+	err      error
+}
+
+func (f *fakeResolver) Resolve(netip.Addr) (location.Resolved, error) {
+	return f.resolved, f.err
+}
+
+func testDeviceHandlerWithSource(service *Service, capacity int, source *location.Source) http.Handler {
+	module := NewModule(service, location.NewChangeLimiter(capacity, 5*time.Minute),
+		source, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	mux := http.NewServeMux()
+	module.RegisterRoutes(mux)
+	return auth.New(testDeviceToken).Wrap(mux)
 }
 
 func TestModuleExposesAllWeatherDatasets(t *testing.T) {
@@ -225,7 +313,8 @@ func TestModuleMapsProviderTimeoutToGatewayTimeout(t *testing.T) {
 func TestModuleLifecycle(t *testing.T) {
 	provider := &fakeProvider{fetch: successfulFetch(time.Now())}
 	service := newTestService(provider, 64)
-	module := NewModule(service, location.NewChangeLimiter(4, time.Minute), slog.Default())
+	module := NewModule(service, location.NewChangeLimiter(4, time.Minute),
+		location.NewSource(nil, nil), slog.Default())
 	if module.Name() != "weather" || module.Start(context.Background()) != nil || module.Ready() != nil {
 		t.Fatal("unexpected module lifecycle result")
 	}
@@ -238,6 +327,7 @@ func TestModuleLifecycle(t *testing.T) {
 
 func testDeviceHandler(service *Service, capacity int) http.Handler {
 	module := NewModule(service, location.NewChangeLimiter(capacity, 5*time.Minute),
+		location.NewSource(nil, nil),
 		slog.New(slog.NewTextHandler(io.Discard, nil)))
 	mux := http.NewServeMux()
 	module.RegisterRoutes(mux)

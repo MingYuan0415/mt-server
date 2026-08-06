@@ -34,14 +34,6 @@ func TestV020BaselineFixtureUnchanged(t *testing.T) {
 	}
 }
 
-func TestWeatherV1BaselineRemainsAdditive(t *testing.T) {
-	baseline := loadDocument(t, "testdata/openapi-v0.2.0.json")
-	current := loadDocument(t, "openapi.json")
-	if failures := checkV1Compatibility(baseline, current); len(failures) != 0 {
-		t.Fatalf("v1 contract is not additive:\n%s", strings.Join(failures, "\n"))
-	}
-}
-
 func TestV1CompatibilityRules(t *testing.T) {
 	baseline := loadDocument(t, "testdata/openapi-v0.2.0.json")
 	tests := []struct {

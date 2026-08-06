@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -19,6 +20,9 @@ type Config struct {
 	StateDir               string
 	AdminAllowInsecureHTTP bool
 	AdminBehindHTTPSProxy  bool
+	GeoIPDBPath            string
+	TrustedClientIPHeader  string
+	TrustedClientIPNets    []netip.Prefix
 }
 
 // Load reads and validates process-level configuration.
@@ -56,13 +60,46 @@ func load(getenv func(string) string) (Config, error) {
 		return Config{}, errors.New("MT_ADMIN_BEHIND_HTTPS_PROXY and MT_ADMIN_ALLOW_INSECURE_HTTP are mutually exclusive")
 	}
 
+	geoIPDBPath := strings.TrimSpace(getenv("MT_GEOIP_DB"))
+	trustedHeader := strings.TrimSpace(getenv("MT_TRUSTED_CLIENT_IP_HEADER"))
+	trustedNets, err := parsePrefixes(getenv("MT_TRUSTED_CLIENT_IP_NETS"))
+	if err != nil {
+		return Config{}, fmt.Errorf("MT_TRUSTED_CLIENT_IP_NETS: %w", err)
+	}
+	if trustedHeader != "" && len(trustedNets) == 0 {
+		return Config{}, errors.New("MT_TRUSTED_CLIENT_IP_HEADER requires MT_TRUSTED_CLIENT_IP_NETS")
+	}
+
 	return Config{
 		ListenAddr:             listenAddr,
 		LogLevel:               logLevel,
 		StateDir:               stateDir,
 		AdminAllowInsecureHTTP: allowInsecure,
 		AdminBehindHTTPSProxy:  behindHTTPSProxy,
+		GeoIPDBPath:            geoIPDBPath,
+		TrustedClientIPHeader:  trustedHeader,
+		TrustedClientIPNets:    trustedNets,
 	}, nil
+}
+
+func parsePrefixes(value string) ([]netip.Prefix, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, nil
+	}
+	var prefixes []netip.Prefix
+	for _, part := range strings.Split(value, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		prefix, err := netip.ParsePrefix(part)
+		if err != nil {
+			return nil, errors.New("invalid CIDR " + part)
+		}
+		prefixes = append(prefixes, prefix)
+	}
+	return prefixes, nil
 }
 
 func boolValue(value string, fallback bool) (bool, error) {

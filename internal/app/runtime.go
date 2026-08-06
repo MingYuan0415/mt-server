@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"regexp"
 	"strings"
 	"sync"
 	"time"
 
+	locationmod "github.com/MingYuan0415/mt-server/internal/modules/location"
 	"github.com/MingYuan0415/mt-server/internal/modules/weather"
 	"github.com/MingYuan0415/mt-server/internal/platform"
 	"github.com/MingYuan0415/mt-server/internal/platform/adminauth"
@@ -18,6 +20,7 @@ import (
 	"github.com/MingYuan0415/mt-server/internal/platform/httpapi"
 	"github.com/MingYuan0415/mt-server/internal/platform/location"
 	"github.com/MingYuan0415/mt-server/internal/platform/state"
+	"github.com/MingYuan0415/mt-server/internal/providers/geoip"
 	"github.com/MingYuan0415/mt-server/internal/providers/qweather"
 )
 
@@ -84,13 +87,31 @@ type RuntimeManager struct {
 	current *runtimeInstance
 	logger  *slog.Logger
 	limiter *location.ChangeLimiter
+	geoIP   *geoip.Store
+	source  *location.Source
 }
 
-// NewRuntimeManager constructs an unconfigured runtime.
-func NewRuntimeManager(logger *slog.Logger) *RuntimeManager {
+// NewRuntimeManager constructs an unconfigured runtime. geoIPDBPath enables
+// IP-inference; trustedHeader and trustedNets configure the trusted-proxy
+// contract for the client-IP header.
+func NewRuntimeManager(logger *slog.Logger, geoIPDBPath, trustedHeader string,
+	trustedNets []netip.Prefix) *RuntimeManager {
+	var geoIPStore *geoip.Store
+	if geoIPDBPath != "" {
+		geoIPStore = geoip.New(geoIPDBPath, logger)
+	}
+	var source *location.Source
+	if geoIPStore != nil {
+		source = location.NewSource(
+			location.NewIPExtractor(trustedHeader, trustedNets), geoIPStore)
+	} else {
+		source = location.NewSource(nil, nil)
+	}
 	return &RuntimeManager{
 		logger:  logger,
 		limiter: location.NewChangeLimiter(locationBurstCapacity, locationRefillPeriod),
+		geoIP:   geoIPStore,
+		source:  source,
 	}
 }
 
@@ -103,7 +124,12 @@ func (m *RuntimeManager) RegisterRoutes(mux *http.ServeMux) {
 }
 
 // Start implements platform.Module.
-func (m *RuntimeManager) Start(context.Context) error { return nil }
+func (m *RuntimeManager) Start(context.Context) error {
+	if m.geoIP != nil {
+		m.geoIP.Start()
+	}
+	return nil
+}
 
 // Ready reports setup and provider circuit state without an upstream call.
 func (m *RuntimeManager) Ready() error {
@@ -193,9 +219,11 @@ func (m *RuntimeManager) Prepare(value state.State) (platform.PreparedChange, er
 		return nil, err
 	}
 	service := weather.NewService(provider, m.logger, options)
-	module := weather.NewModule(service, m.limiter, m.logger)
+	module := weather.NewModule(service, m.limiter, m.source, m.logger)
+	locationModule := locationmod.NewModule(m.source)
 	apiMux := http.NewServeMux()
 	module.RegisterRoutes(apiMux)
+	locationModule.RegisterRoutes(apiMux)
 	apiMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		httpapi.WriteError(w, r, http.StatusNotFound, "not_found", "resource not found")
 	})
@@ -244,12 +272,17 @@ func (m *RuntimeManager) PrepareTokens(tokens []state.DeviceToken) (platform.Pre
 	}, nil
 }
 
-// Close stops the active weather service.
+// Close stops the active weather service and the geoip poller.
 func (m *RuntimeManager) Close(ctx context.Context) error {
 	m.mu.Lock()
 	current := m.current
 	m.current = nil
 	m.mu.Unlock()
+	if m.geoIP != nil {
+		if err := m.geoIP.Close(); err != nil {
+			m.logger.Warn("geoip store did not close cleanly", "error", err)
+		}
+	}
 	if current == nil {
 		return nil
 	}

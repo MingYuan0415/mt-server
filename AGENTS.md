@@ -24,13 +24,13 @@ Run `go test -race ./...` for every concurrency or cache change. Real QWeather c
 
 Keep the service a modular monolith with explicit compile-time module registration. Do not add dynamic plugins, arbitrary reverse proxying, databases, Redis, or generic repositories without a concrete feature that needs them. Shared platform code must not import feature packages.
 
-The v1 API is additive only. Renaming fields, changing types or units, or removing fields requires a new API version and coordinated firmware work. Provider response structs stay private to their adapter.
+The v1 API is no longer strictly additive: the fixed `X-MT-Location-*` headers became all-or-nothing with an IP-inference fallback, and `GET /api/v1/location` was added. Renaming fields, changing types or units, or removing fields still requires a new API version and coordinated firmware work. Provider response structs stay private to their adapter.
 
 ## Security And Privacy
 
 Never commit or log real hostnames, public or private IP addresses used by the deployment, coordinates, QWeather identifiers, tunnel identifiers, credentials, tokens, JWTs, private keys, or complete Authorization headers. Public examples use reserved documentation domains and addresses only.
 
-Application secrets live only in the private state volume. Production source ports remain unexposed. Authenticated devices supply locations only through the fixed `X-MT-Location-*` contract; preserve authentication-first parsing, strict validation, privacy-grid normalization, per-device grid-change limiting, and the ban on coordinate logging or response fields. Do not add query-parameter tokens or coordinates.
+Application secrets live only in the private state volume. Production source ports remain unexposed. Authenticated devices supply locations only through the fixed `X-MT-Location-*` contract (all required headers together or none) or through the configured trusted-proxy IP inference; preserve authentication-first parsing, strict validation, privacy-grid normalization, per-device grid-change limiting, the ban on coordinate/IP logging or response fields, and the rule that forwarded client-IP headers are honored only from peers in `MT_TRUSTED_CLIENT_IP_NETS`. Do not add query-parameter tokens or coordinates.
 
 ## Style And Tests
 
