@@ -77,6 +77,7 @@ func testVerification() weather.Verification {
 		Source: weather.Source{ID: "qweather", Name: "QWeather", AttributionURL: "https://www.qweather.com/"},
 		Location: weather.PublicLocation{
 			City: "Example", Source: "browser", Provider: "browser", Precision: "coarse",
+			LocationKey: "9f4a2b3c8d1e5f06",
 		},
 		TestedAt:  time.Date(2026, 8, 2, 1, 0, 0, 0, time.UTC),
 		UpdatedAt: time.Date(2026, 8, 2, 0, 55, 0, 0, time.UTC),

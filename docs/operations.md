@@ -81,9 +81,9 @@ X-MT-Location-Country    (可选)
 X-MT-Location-Timezone   (可选)
 ```
 
-纬度、经度和 Provider 需要同时提供或同时省略。提供时，服务校验坐标范围、有限值、Provider 格式和可选元数据，并将坐标归一化到 `0.1` 度网格；只提供其中一部分返回 `400 invalid_location`。省略时启用 IP 推断（见下节），推断不可用返回 `503 location_unavailable`；未配置 GeoLite2 推断时，天气接口对无位置头请求返回 `400 location_required`，`GET /api/v1/location` 返回 `503 location_unavailable`。以上情况都不会调用 QWeather。
+纬度、经度和 Provider 需要同时提供或同时省略。提供时，服务校验坐标范围、有限值、Provider 格式和可选元数据，并将坐标归一化到 `0.1` 度网格；只提供其中一部分返回 `400 invalid_location`。省略时启用 IP 推断（见下节），推断不可用返回 `503 location_unavailable`；未配置任何 IP 推断时，天气接口对无位置头请求返回 `400 location_required`，`GET /api/v1/location` 返回 `503 location_unavailable`。以上情况都不会调用 QWeather。
 
-服务不读取任意转发头（如 `X-Forwarded-For`）、查询参数或其他位置头；未配置可信客户端 IP 头时，IP 推断使用直连对端地址，该地址从不记录或返回。响应只返回当前请求的可选显示元数据、来源、Provider 和精度，不返回坐标或 IP。相同网格共享天气数据缓存，但显示元数据不进入缓存。`GET /api/v1/location` 返回 `schema_version`、位置元数据和可选 `accuracy_radius_km`，同样不包含 IP 或坐标。
+服务不读取任意转发头（如 `X-Forwarded-For`）、查询参数或其他位置头；配置了 Cloudflare 访客位置头时，只读取网段内直连代理提供的坐标对。未配置可信客户端 IP 头时，IP 推断使用直连对端地址，该地址从不记录或返回。响应只返回当前请求的可选显示元数据、来源、Provider、精度和 `location_key`，不返回坐标或 IP。`location_key` 由服务端按归一化网格确定性派生的 16 位小写十六进制字符串派生，不直接包含坐标或 IP，同一网格恒定、网格变化时变化，不随 GeoIP 数据库热重载变化；它不是密码学匿名化——网格空间可枚举，仅作为位置作用域身份比较依据，显示字段仅供展示。相同网格共享天气数据缓存，但显示元数据不进入缓存。`GET /api/v1/location` 返回 `schema_version`、位置元数据、可选 `accuracy_radius_km` 和 `location_key`，同样不包含 IP 或坐标。
 
 预警响应是同一位置的完整快照，设备应替换旧列表而不是按 ID 增量合并。空列表表示当前无预警；`truncated=true` 表示上游条目超过公开上限。预警默认新鲜 10 分钟，发生上游故障时最多返回 1 小时内且带 `stale=true` 的缓存。
 
@@ -105,6 +105,21 @@ volumes:
 - 设置头但未设置网段会拒绝启动。私有、环回、链路本地、CGNAT 和文档网段不可定位。
 - MMDB 由外部官方 `geoipupdate` 维护：账户凭据放入只对更新任务可见的配置，数据库写入独立私有卷（应用只读挂载）。应用每 5 分钟检测文件替换并热重载，无需重启。
 - GeoLite2 数据受 MaxMind 许可约束，包含署名义务；不要把 MMDB 打包进公开镜像。
+
+## Cloudflare 访客位置头
+
+Cloudflare 的“托管转换 → 添加访问者位置标头（Add visitor location headers）”会向源站请求添加 `CF-IPLatitude`、`CF-IPLongitude`、`CF-IPCity`、`CF-Region`、`CF-IPCountry` 和 `CF-Timezone`。启用该转换后，服务可按以下方式解析，无需本地 MMDB：
+
+```yaml
+environment:
+  MT_CLOUDFLARE_LOCATION_HEADERS: "true"
+  MT_TRUSTED_CLIENT_IP_NETS: "127.0.0.1/32"
+```
+
+- 启用时必须设置 `MT_TRUSTED_CLIENT_IP_NETS`，否则拒绝启动。这些头只在直连来源属于配置网段时读取；其余请求一律忽略，防止绕过代理伪造位置。请同时把源站端口限制为仅代理可访问。
+- 经纬度必须同时出现且各为单值。坐标对完全缺失（例如只出现 `CF-IPCountry`、或根本没有位置头）不会激活该来源，服务继续尝试其他推断（如 MMDB）；一旦坐标对出现但只提供其一、为空白、重复或非法，直接返回 `location_unavailable`，不会降级到 MMDB 或其他来源。
+- 结果固定为 `source: "ip"`、`provider: "cloudflare"`、`precision: "coarse"`，不含 `accuracy_radius_km`。显式设备位置头始终优先。
+- 仅配置 `CF-IPCountry`（IP Geolocation 设置）不满足本服务的位置需求，必须启用完整“Add visitor location headers”托管转换。
 
 示例 sidecar（仅示意，实际应使用官方镜像并妥善保管凭据）：
 
@@ -136,7 +151,7 @@ curl http://127.0.0.1:8080/health/ready
 - 正常配置：live 和 ready 均为 200。
 - 部分或非法请求位置：天气接口返回 400，不调用 QWeather。
 - 省略位置头且未配置推断：天气接口返回 400 `location_required`，`/api/v1/location` 返回 503 `location_unavailable`。
-- 省略位置头且已配置推断但推断不可用：天气接口与 `/api/v1/location` 均返回 503 `location_unavailable`。
+- 省略位置头且已配置推断但推断不可用：天气接口与 `/api/v1/location` 均返回 503 `location_unavailable`。启用 Cloudflare 访客位置头时，可信请求携带非法坐标对直接属于此情况；坐标对完全缺失时，仅在其余推断（如 MMDB）也不可用时才返回 503。
 - 位置切换过快：天气接口返回 429，并附带 `Retry-After`。
 - QWeather 认证熔断：live 为 200，ready 为 503；已有缓存允许时仍可返回 `stale=true`。
 - 状态目录同步未确认：写操作仍成功并返回 `X-MT-State-Warning: durability_unconfirmed`，管理概览持续显示告警；检查状态卷后执行下一次管理写入以重新确认。

@@ -56,6 +56,10 @@ func TestModuleReturnsStablePrivacyReducedEnvelope(t *testing.T) {
 		publicLocation["precision"] != "city" || publicLocation["city"] != "Shenzhen" {
 		t.Fatalf("unexpected location %#v", publicLocation)
 	}
+	key, _ := publicLocation["location_key"].(string)
+	if len(key) != 16 {
+		t.Fatalf("unexpected location key %q", key)
+	}
 	body := recorder.Body.String()
 	for _, forbidden := range []string{"latitude", "longitude", "CF-IP", "X-Forwarded", "192.0.2.1"} {
 		if strings.Contains(body, forbidden) {
@@ -156,10 +160,94 @@ func TestModuleFallsBackToIPInferenceWithoutHeaders(t *testing.T) {
 		publicLocation["precision"] != "coarse" || publicLocation["city"] != "IP City" {
 		t.Fatalf("unexpected IP location %#v", publicLocation)
 	}
+	key, _ := publicLocation["location_key"].(string)
+	if len(key) != 16 {
+		t.Fatalf("unexpected location key %q", key)
+	}
 	for _, forbidden := range []string{"latitude", "longitude", "22.5", "114.1"} {
 		if strings.Contains(recorder.Body.String(), forbidden) {
 			t.Fatalf("response leaked %q: %s", forbidden, recorder.Body.String())
 		}
+	}
+}
+
+func TestModuleFailsClosedOnMalformedTrustedCloudflareHeaders(t *testing.T) {
+	var fetches atomic.Int32
+	provider := &fakeProvider{fetch: func(context.Context, Kind, location.Point) (ProviderResult, error) {
+		fetches.Add(1)
+		return successfulFetch(time.Now())(context.Background(), KindCurrent, location.Point{})
+	}}
+	service := newTestService(provider, 64)
+	defer closeService(t, service)
+	source := location.NewSourceWithCloudflare(nil, nil, location.NewCloudflare(
+		[]netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}))
+	handler := testDeviceHandlerWithSource(service, 4, source)
+
+	request := httptest.NewRequest(http.MethodGet,
+		"https://api.example.com/api/v1/weather/current", nil)
+	request.RemoteAddr = "10.1.2.3:54321"
+	request.Header.Set("Authorization", "Bearer "+testDeviceToken)
+	request.Header.Set("CF-IPLatitude", "22.5431")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusServiceUnavailable ||
+		!strings.Contains(recorder.Body.String(), "location_unavailable") {
+		t.Fatalf("malformed trusted headers must fail closed, got %d %s",
+			recorder.Code, recorder.Body.String())
+	}
+	if fetches.Load() != 0 {
+		t.Fatalf("malformed cloudflare location reached the provider %d times", fetches.Load())
+	}
+}
+
+func TestModuleIgnoresMalformedUntrustedCloudflareHeaders(t *testing.T) {
+	now := time.Date(2026, 8, 2, 0, 0, 0, 0, time.UTC)
+	provider := &fakeProvider{fetch: successfulFetch(now)}
+	service := newTestService(provider, 64)
+	service.now = func() time.Time { return now }
+	defer closeService(t, service)
+	source := location.NewSourceWithCloudflare(
+		location.NewIPExtractor("", nil), &fakeResolver{
+			resolved: location.Resolved{Point: location.Point{
+				Latitude: 22.5431, Longitude: 114.0579, City: "IP City",
+				Source: "ip", Provider: "maxmind", Precision: "coarse",
+			}},
+		}, location.NewCloudflare([]netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}))
+	handler := testDeviceHandlerWithSource(service, 4, source)
+
+	request := httptest.NewRequest(http.MethodGet,
+		"https://api.example.com/api/v1/weather/current", nil)
+	request.RemoteAddr = "192.0.2.44:1234"
+	request.Header.Set("Authorization", "Bearer "+testDeviceToken)
+	request.Header.Set("CF-IPLatitude", "garbage")
+	request.Header.Set("CF-IPLongitude", "also-bad")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("untrusted headers must be ignored, got %d %s",
+			recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), `"provider":"maxmind"`) {
+		t.Fatalf("expected resolver fallback: %s", recorder.Body.String())
+	}
+}
+
+func TestModuleRejectsUnauthenticatedCloudflareHeaders(t *testing.T) {
+	service := newTestService(&fakeProvider{fetch: successfulFetch(time.Now())}, 64)
+	defer closeService(t, service)
+	source := location.NewSourceWithCloudflare(nil, nil, location.NewCloudflare(
+		[]netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}))
+	handler := testDeviceHandlerWithSource(service, 4, source)
+
+	request := httptest.NewRequest(http.MethodGet,
+		"https://api.example.com/api/v1/weather/current", nil)
+	request.RemoteAddr = "10.1.2.3:54321"
+	request.Header.Set("CF-IPLatitude", "22.5431")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("authentication must precede location parsing, got %d %s",
+			recorder.Code, recorder.Body.String())
 	}
 }
 

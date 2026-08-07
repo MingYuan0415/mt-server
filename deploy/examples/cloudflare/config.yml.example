@@ -1,6 +1,10 @@
 tunnel: 00000000-0000-0000-0000-000000000000
 credentials-file: /run/secrets/cloudflared_credentials.json
 
+# 为获得访客位置（mt-server 的 Cloudflare 推断源），需在 Cloudflare 控制台
+# 启用 Rules -> Transform Rules -> Managed Transforms -> "Add visitor location
+# headers"，并在 mt-server 配置 MT_CLOUDFLARE_LOCATION_HEADERS=true 及
+# MT_TRUSTED_CLIENT_IP_NETS（直连代理网段）。
 ingress:
   - hostname: api.example.com
     service: http://mt-server:8080

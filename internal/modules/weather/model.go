@@ -29,6 +29,9 @@ type PublicLocation struct {
 	Source    string `json:"source"`
 	Provider  string `json:"provider"`
 	Precision string `json:"precision"`
+	// LocationKey is the opaque grid-scope identity derived from the
+	// normalized 0.1-degree grid. It never contains coordinates or the IP.
+	LocationKey string `json:"location_key,omitempty"`
 }
 
 // Envelope is the stable device-facing response shape.

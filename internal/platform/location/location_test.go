@@ -30,6 +30,37 @@ func TestFromRequestParsesAndNormalizesDeviceLocation(t *testing.T) {
 		point.Provider != "ipinfo" || point.Source != "device" || point.Precision != "city" {
 		t.Fatalf("unexpected point %#v", point)
 	}
+	if point.Key != "cc70e9b302c4b12b" {
+		t.Fatalf("unexpected location key %q", point.Key)
+	}
+}
+
+func TestNormalizeDerivesStableLocationKey(t *testing.T) {
+	first, err := Normalize(Point{Latitude: 22.5431, Longitude: 114.0579})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := Normalize(Point{Latitude: 22.5499, Longitude: 114.1499})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Key != second.Key || first.Key == "" {
+		t.Fatalf("same grid must derive the same key: %q vs %q", first.Key, second.Key)
+	}
+	third, err := Normalize(Point{Latitude: 22.6, Longitude: 114.1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if third.Key == first.Key {
+		t.Fatalf("different grid must derive a different key: %q", third.Key)
+	}
+	if len(first.Key) != 16 || first.Key != strings.ToLower(first.Key) {
+		t.Fatalf("location key must be 16 lowercase hex digits: %q", first.Key)
+	}
+	if first.Key != locationKey(first.Latitude, first.Longitude) {
+		t.Fatalf("location key must be derived from the canonical grid string: %q",
+			first.Key)
+	}
 }
 
 func TestFromRequestRequiresCoordinatesAndProvider(t *testing.T) {
@@ -95,6 +126,13 @@ func TestNormalizeAcceptsCoordinateBoundariesAndCanonicalizesZero(t *testing.T) 
 	}
 	if math.Signbit(point.Latitude) || point.Longitude != 180 {
 		t.Fatalf("unexpected normalized boundary %#v", point)
+	}
+	zero, err := Normalize(Point{Latitude: math.Copysign(0, -1), Longitude: -0.0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if zero.Key != "3e0f3d3bb294400b" {
+		t.Fatalf("negative zero must canonicalize to the zero-grid key, got %q", zero.Key)
 	}
 }
 

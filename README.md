@@ -82,9 +82,9 @@ curl https://api.example.com/api/v1/weather/current \
 
 服务先完成鉴权，再解析位置头。坐标必须有限且在合法范围内；来源标识必须匹配 `[a-z0-9][a-z0-9._-]{0,31}`；可选元数据必须为合法 UTF-8、无控制字符且不超过 128 个字符。服务不读取任意转发头或查询参数；未配置可信客户端 IP 头时，IP 推断使用直连对端地址，该地址从不记录或返回。
 
-位置头必须同时提供或同时省略：只提供其中一部分会返回 `400 invalid_location`。省略全部位置头时，如果部署配置了 GeoLite2 数据库，服务会根据设备公网出口 IP 推断粗粒度位置（`source: "ip"`、`precision: "coarse"`），并照常归一化、限速和缓存；可信客户端 IP 头为可选配置，未配置时使用直连对端地址（隧道部署建议配置以获取真实公网 IP）。推断不可用时返回 `503 location_unavailable`；未配置 GeoLite2 推断时，天气接口对无位置头请求返回 `400 location_required`，`/api/v1/location` 返回 `503 location_unavailable`。
+位置头必须同时提供或同时省略：只提供其中一部分会返回 `400 invalid_location`。省略全部位置头时，如果部署配置了可信 Cloudflare 访客位置头（`MT_CLOUDFLARE_LOCATION_HEADERS=true`）或 GeoLite2 数据库，服务会根据设备公网出口 IP 推断粗粒度位置（`source: "ip"`、`precision: "coarse"`），并照常归一化、限速和缓存；可信客户端 IP 头为可选配置，未配置时使用直连对端地址（隧道部署建议配置以获取真实公网 IP）。推断不可用时返回 `503 location_unavailable`；未配置任何推断时，天气接口对无位置头请求返回 `400 location_required`，`/api/v1/location` 返回 `503 location_unavailable`。
 
-`GET /api/v1/location` 返回将用于天气请求的位置（显式头优先，否则为 IP 推断结果），只包含城市、地区、国家、时区、来源、提供方、精度和可选 `accuracy_radius_km`，从不返回 IP 或坐标。设备可在无 GPS 时用该端点获取自身所在城市，再决定是否需要显式位置头。
+`GET /api/v1/location` 返回将用于天气请求的位置（显式头优先，否则为 IP 推断结果），只包含城市、地区、国家、时区、来源、提供方、精度、可选 `accuracy_radius_km` 和 `location_key`，从不返回 IP 或坐标。`location_key` 是由服务端按 0.1° 网格确定性派生的 16 位小写十六进制不透明标识，不直接包含坐标或 IP，同一网格恒定，网格变化时变化；它不是密码学匿名化——网格空间可枚举，仅作为位置作用域身份比较的依据（显示字段仅供展示）。设备可在无 GPS 时用该端点获取自身所在城市，再决定是否需要显式位置头。
 
 天气接口在缺少全部位置头且未配置推断时返回 `400 location_required`，非法内容返回 `400 invalid_location`，位置变化超限返回 `429 location_rate_limited`；`/api/v1/location` 对无位置头且无推断请求返回 `503 location_unavailable`。完整请求、响应和错误契约见 [`api/openapi.json`](api/openapi.json)。
 
@@ -100,14 +100,15 @@ curl https://api.example.com/api/v1/weather/current \
 | `MT_ADMIN_ALLOW_INSECURE_HTTP` | `false` | 仅在受信 LAN 中允许 HTTP 管理写操作 |
 | `MT_ADMIN_BEHIND_HTTPS_PROXY` | `false` | 明确声明管理入口始终由受信 HTTPS 代理提供 |
 | `MT_GEOIP_DB` | 空 | GeoLite2 City MMDB 文件路径；设置后启用 IP 位置推断 |
+| `MT_CLOUDFLARE_LOCATION_HEADERS` | `false` | 读取可信直连代理提供的 Cloudflare 访客位置头（需启用托管转换 “Add visitor location headers”）；启用时必填 `MT_TRUSTED_CLIENT_IP_NETS` |
 | `MT_TRUSTED_CLIENT_IP_HEADER` | 空 | 从受信代理读取客户端 IP 的请求头（如 `CF-Connecting-IP`） |
-| `MT_TRUSTED_CLIENT_IP_NETS` | 空 | 可提供客户端 IP 头的代理网段（逗号分隔的 CIDR） |
+| `MT_TRUSTED_CLIENT_IP_NETS` | 空 | 可提供客户端 IP 与位置头的代理网段（逗号分隔的 CIDR） |
 
 两个管理传输开关不能同时启用。HTTPS 代理模式的域名列表保存在私有状态中，由初始化页和“管理域名”页面维护；服务直接匹配浏览器 `Origin`，不信任 `Forwarded`、`X-Forwarded-Host` 或 `X-Forwarded-Proto`。代理必须确保源站只允许代理访问。
 
-IP 推断只信任 `MT_TRUSTED_CLIENT_IP_NETS` 中直连代理提供的 `MT_TRUSTED_CLIENT_IP_HEADER` 值，其余请求一律使用连接对端地址。设置头但未设置网段会拒绝启动。公网 IP 推断是“网络出口附近的粗略天气区域”，不等于设备真实位置；移动网络、CGNAT、VPN 会定位到运营商或代理出口。MMDB 由外部 `geoipupdate` 写入私有卷，应用只读并检测替换后热加载，密钥不进入镜像、仓库或应用日志。
+IP 推断只信任 `MT_TRUSTED_CLIENT_IP_NETS` 中直连代理提供的 `MT_TRUSTED_CLIENT_IP_HEADER` 值，其余请求一律使用连接对端地址。设置头但未设置网段会拒绝启动。公网 IP 推断是“网络出口附近的粗略天气区域”，不等于设备真实位置；移动网络、CGNAT、VPN 会定位到运营商或代理出口。启用 Cloudflare 访客位置头时，`CF-IPLatitude`/`CF-IPLongitude` 也只从网段内直连代理读取，其余请求忽略；坐标对完全缺失时继续尝试其他推断，只出现其一、为空白、重复或非法时直接返回 `location_unavailable`，不会降级到其他来源。MMDB 由外部 `geoipupdate` 写入私有卷，应用只读并检测替换后热加载，密钥不进入镜像、仓库或应用日志。
 
-QWeather 私钥、管理员密码验证器、管理域名、缓存策略和设备令牌哈希保存在状态卷中。请求位置只用于单次请求、网格限速和内存缓存键，不写入持久状态；IP 推断结果同样不落盘，客户端 IP 和坐标从不记录或返回。
+QWeather 私钥、管理员密码验证器、管理域名、缓存策略和设备令牌哈希保存在状态卷中。请求位置只用于单次请求、网格限速和内存缓存键，不写入持久状态；IP 推断结果同样不落盘，客户端 IP 和坐标从不记录或返回。`location_key` 由归一化网格确定性派生、无需持久化，也不进入日志或持久状态。
 
 ## 开发与验证
 

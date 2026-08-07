@@ -3,6 +3,8 @@ package location
 
 import (
 	"errors"
+	"fmt"
+	"hash/fnv"
 	"math"
 	"net/http"
 	"regexp"
@@ -50,6 +52,10 @@ type Point struct {
 	Source    string
 	Provider  string
 	Precision string
+	// Key is the opaque grid-scope identity derived from the normalized
+	// 0.1-degree grid. It is empty until Normalize runs; callers treat an
+	// empty value as "no key".
+	Key string
 }
 
 // FromRequest parses the fixed device location header contract. It returns
@@ -97,8 +103,22 @@ func FromRequest(request *http.Request) (Point, bool, error) {
 
 // CacheKey returns a privacy-reduced location key.
 func (p Point) CacheKey() string {
-	return strconv.FormatFloat(p.Latitude, 'f', 1, 64) + "," +
-		strconv.FormatFloat(p.Longitude, 'f', 1, 64)
+	return gridString(p.Latitude, p.Longitude)
+}
+
+// gridString is the canonical one-decimal representation of a grid point.
+func gridString(latitude, longitude float64) string {
+	return strconv.FormatFloat(latitude, 'f', 1, 64) + "," +
+		strconv.FormatFloat(longitude, 'f', 1, 64)
+}
+
+// locationKey derives the opaque 16-hex grid-scope identity. It is not
+// cryptographic: the 0.1-degree grid space is enumerable, so the value must
+// not be presented as anonymous. It never contains coordinates directly.
+func locationKey(latitude, longitude float64) string {
+	hasher := fnv.New64a()
+	_, _ = hasher.Write([]byte(gridString(latitude, longitude)))
+	return fmt.Sprintf("%016x", hasher.Sum64())
 }
 
 // Normalize validates and rounds a point to the privacy grid.
@@ -124,6 +144,7 @@ func Normalize(point Point) (Point, error) {
 	if point.Longitude == 0 {
 		point.Longitude = 0
 	}
+	point.Key = locationKey(point.Latitude, point.Longitude)
 	return point, nil
 }
 

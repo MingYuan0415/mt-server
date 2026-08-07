@@ -120,6 +120,15 @@ func TestV1CompatibilityRules(t *testing.T) {
 			},
 			wantPath: `$["components"]["schemas"]["CurrentWeather"]["required"]["dew_point_c"]`,
 		},
+		{
+			name: "new response field made required",
+			mutate: func(document map[string]any) {
+				schema := document["components"].(map[string]any)["schemas"].(map[string]any)["CurrentWeather"].(map[string]any)
+				schemaProperties(document, "CurrentWeather")["new_field"] = map[string]any{"type": "string"}
+				schema["required"] = append(schema["required"].([]any), "new_field")
+			},
+			wantPath: `$["components"]["schemas"]["CurrentWeather"]["required"]["new_field"]`,
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -146,6 +155,57 @@ func TestV1CompatibilityAllowsAdditions(t *testing.T) {
 		map[string]any{"description": "Additional response"}
 	if failures := checkV1Compatibility(baseline, candidate); len(failures) != 0 {
 		t.Fatalf("additive changes were rejected:\n%s", strings.Join(failures, "\n"))
+	}
+}
+
+// knownV1Deviations returns the exact failure strings of the intentional
+// non-additive v1 changes blessed when IP-inference fallback was introduced:
+// the fixed X-MT-Location-* headers became all-or-nothing optional, and the
+// Location source/precision constraints widened from const to enum. The
+// current document must produce exactly this set of failures against the
+// v0.2.0 baseline and nothing else.
+func knownV1Deviations() map[string]struct{} {
+	allowed := map[string]struct{}{
+		`$["components"]["schemas"]["Location"]["properties"]["source"]["const"] changed from "device" to null`:            {},
+		`$["components"]["schemas"]["Location"]["properties"]["source"]["enum"] changed from null to ["device","ip"]`:      {},
+		`$["components"]["schemas"]["Location"]["properties"]["precision"]["const"] changed from "city" to null`:           {},
+		`$["components"]["schemas"]["Location"]["properties"]["precision"]["enum"] changed from null to ["city","coarse"]`: {},
+		`$["components"]["parameters"]["LocationLatitude"]["required"] changed from true to false`:                         {},
+		`$["components"]["parameters"]["LocationLongitude"]["required"] changed from true to false`:                        {},
+		`$["components"]["parameters"]["LocationProvider"]["required"] changed from true to false`:                         {},
+	}
+	for _, kind := range []string{"current", "hourly", "daily"} {
+		for _, index := range []string{"0", "1", "2"} {
+			path := `$["paths"]["/api/v1/weather/` + kind + `"]["get"]["parameters"][` + index + `]["required"] changed from true to false`
+			allowed[path] = struct{}{}
+		}
+	}
+	return allowed
+}
+
+func TestCurrentOpenAPIMeetsV1Baseline(t *testing.T) {
+	baseline := loadDocument(t, "testdata/openapi-v0.2.0.json")
+	current := loadDocument(t, "openapi.json")
+	failures := checkV1Compatibility(baseline, current)
+	expected := knownV1Deviations()
+	seen := make(map[string]struct{}, len(failures))
+	var unexpected []string
+	for _, failure := range failures {
+		seen[failure] = struct{}{}
+		if _, ok := expected[failure]; !ok {
+			unexpected = append(unexpected, failure)
+		}
+	}
+	var missing []string
+	for deviation := range expected {
+		if _, ok := seen[deviation]; !ok {
+			missing = append(missing, deviation)
+		}
+	}
+	if len(unexpected) != 0 || len(missing) != 0 {
+		t.Fatalf("current OpenAPI document deviates from the v1 baseline:\n"+
+			"unexpected failures:\n%s\nmissing expected deviations:\n%s",
+			strings.Join(unexpected, "\n"), strings.Join(missing, "\n"))
 	}
 }
 
@@ -484,8 +544,11 @@ func (c *compatibilityChecker) compareSchema(baselineValue, currentValue any, lo
 		if slices.Contains(baselineRequired, name) {
 			continue
 		}
+		requiredLocation := jsonPath(location, "required", name)
 		if _, existed := baselineProperties[name]; existed {
-			c.failures = append(c.failures, jsonPath(location, "required", name)+" makes an existing field required")
+			c.failures = append(c.failures, requiredLocation+" makes an existing field required")
+		} else {
+			c.failures = append(c.failures, requiredLocation+" adds a new required field")
 		}
 	}
 	for name, baselineProperty := range baselineProperties {

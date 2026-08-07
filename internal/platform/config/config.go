@@ -15,14 +15,15 @@ import (
 // Config contains settings that must be known before persistent application
 // state can be opened.
 type Config struct {
-	ListenAddr             string
-	LogLevel               string
-	StateDir               string
-	AdminAllowInsecureHTTP bool
-	AdminBehindHTTPSProxy  bool
-	GeoIPDBPath            string
-	TrustedClientIPHeader  string
-	TrustedClientIPNets    []netip.Prefix
+	ListenAddr                string
+	LogLevel                  string
+	StateDir                  string
+	AdminAllowInsecureHTTP    bool
+	AdminBehindHTTPSProxy     bool
+	GeoIPDBPath               string
+	CloudflareLocationHeaders bool
+	TrustedClientIPHeader     string
+	TrustedClientIPNets       []netip.Prefix
 }
 
 // Load reads and validates process-level configuration.
@@ -61,6 +62,10 @@ func load(getenv func(string) string) (Config, error) {
 	}
 
 	geoIPDBPath := strings.TrimSpace(getenv("MT_GEOIP_DB"))
+	cloudflareHeaders, err := boolValue(getenv("MT_CLOUDFLARE_LOCATION_HEADERS"), false)
+	if err != nil {
+		return Config{}, fmt.Errorf("MT_CLOUDFLARE_LOCATION_HEADERS: %w", err)
+	}
 	trustedHeader := strings.TrimSpace(getenv("MT_TRUSTED_CLIENT_IP_HEADER"))
 	trustedNets, err := parsePrefixes(getenv("MT_TRUSTED_CLIENT_IP_NETS"))
 	if err != nil {
@@ -69,16 +74,20 @@ func load(getenv func(string) string) (Config, error) {
 	if trustedHeader != "" && len(trustedNets) == 0 {
 		return Config{}, errors.New("MT_TRUSTED_CLIENT_IP_HEADER requires MT_TRUSTED_CLIENT_IP_NETS")
 	}
+	if cloudflareHeaders && len(trustedNets) == 0 {
+		return Config{}, errors.New("MT_CLOUDFLARE_LOCATION_HEADERS requires MT_TRUSTED_CLIENT_IP_NETS")
+	}
 
 	return Config{
-		ListenAddr:             listenAddr,
-		LogLevel:               logLevel,
-		StateDir:               stateDir,
-		AdminAllowInsecureHTTP: allowInsecure,
-		AdminBehindHTTPSProxy:  behindHTTPSProxy,
-		GeoIPDBPath:            geoIPDBPath,
-		TrustedClientIPHeader:  trustedHeader,
-		TrustedClientIPNets:    trustedNets,
+		ListenAddr:                listenAddr,
+		LogLevel:                  logLevel,
+		StateDir:                  stateDir,
+		AdminAllowInsecureHTTP:    allowInsecure,
+		AdminBehindHTTPSProxy:     behindHTTPSProxy,
+		GeoIPDBPath:               geoIPDBPath,
+		CloudflareLocationHeaders: cloudflareHeaders,
+		TrustedClientIPHeader:     trustedHeader,
+		TrustedClientIPNets:       trustedNets,
 	}, nil
 }
 

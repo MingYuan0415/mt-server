@@ -67,6 +67,10 @@ func TestLocationModuleReturnsDisplaySafeMetadata(t *testing.T) {
 		publicLocation["precision"] != "coarse" {
 		t.Fatalf("unexpected location %#v", publicLocation)
 	}
+	key, _ := publicLocation["location_key"].(string)
+	if len(key) != 16 {
+		t.Fatalf("unexpected location key %q", key)
+	}
 	if response["accuracy_radius_km"] != float64(50) {
 		t.Fatalf("unexpected accuracy %#v", response["accuracy_radius_km"])
 	}
@@ -103,6 +107,64 @@ func TestLocationModuleRejectsInferenceFailures(t *testing.T) {
 	}
 }
 
+func TestLocationModuleFailsClosedOnMalformedTrustedCloudflareHeaders(t *testing.T) {
+	source := location.NewSourceWithCloudflare(nil, nil, location.NewCloudflare(
+		[]netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}))
+	handler := testLocationHandlerWithSource(source)
+	request := httptest.NewRequest(http.MethodGet,
+		"https://api.example.com/api/v1/location", nil)
+	request.RemoteAddr = "10.1.2.3:54321"
+	request.Header.Set("Authorization", "Bearer "+testDeviceToken)
+	request.Header.Set("CF-IPLatitude", "22.5431")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusServiceUnavailable ||
+		!strings.Contains(recorder.Body.String(), "location_unavailable") {
+		t.Fatalf("malformed trusted headers must fail closed, got %d %s",
+			recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestLocationModuleIgnoresUntrustedCloudflareHeaders(t *testing.T) {
+	source := location.NewSourceWithCloudflare(
+		location.NewIPExtractor("", nil), &fakeResolver{
+			resolved: location.Resolved{Point: location.Point{
+				Latitude: 22.5431, Longitude: 114.0579, City: "Shenzhen",
+				Source: "ip", Provider: "maxmind", Precision: "coarse",
+			}},
+		}, location.NewCloudflare([]netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}))
+	handler := testLocationHandlerWithSource(source)
+	request := httptest.NewRequest(http.MethodGet,
+		"https://api.example.com/api/v1/location", nil)
+	request.RemoteAddr = "192.0.2.44:1234"
+	request.Header.Set("Authorization", "Bearer "+testDeviceToken)
+	request.Header.Set("CF-IPLatitude", "garbage")
+	request.Header.Set("CF-IPLongitude", "also-bad")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK ||
+		!strings.Contains(recorder.Body.String(), `"provider":"maxmind"`) {
+		t.Fatalf("untrusted headers must be ignored, got %d %s",
+			recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestLocationModuleRejectsUnauthenticatedCloudflareHeaders(t *testing.T) {
+	source := location.NewSourceWithCloudflare(nil, nil, location.NewCloudflare(
+		[]netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}))
+	handler := testLocationHandlerWithSource(source)
+	request := httptest.NewRequest(http.MethodGet,
+		"https://api.example.com/api/v1/location", nil)
+	request.RemoteAddr = "10.1.2.3:54321"
+	request.Header.Set("CF-IPLatitude", "22.5431")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("authentication must precede location parsing, got %d %s",
+			recorder.Code, recorder.Body.String())
+	}
+}
+
 func testLocationHandler(resolver location.Resolver) http.Handler {
 	var source *location.Source
 	if resolver != nil {
@@ -110,6 +172,10 @@ func testLocationHandler(resolver location.Resolver) http.Handler {
 	} else {
 		source = location.NewSource(nil, nil)
 	}
+	return testLocationHandlerWithSource(source)
+}
+
+func testLocationHandlerWithSource(source *location.Source) http.Handler {
 	module := NewModule(source)
 	mux := http.NewServeMux()
 	module.RegisterRoutes(mux)

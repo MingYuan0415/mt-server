@@ -90,3 +90,24 @@ func TestLoadRejectsHeaderWithoutTrustedNets(t *testing.T) {
 		t.Fatal("expected header-without-nets rejection")
 	}
 }
+
+func TestLoadCloudflareLocationConfiguration(t *testing.T) {
+	values := map[string]string{
+		"MT_CLOUDFLARE_LOCATION_HEADERS": "true",
+		"MT_TRUSTED_CLIENT_IP_NETS":      "127.0.0.1/32",
+	}
+	value, err := load(func(name string) string { return values[name] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !value.CloudflareLocationHeaders || len(value.TrustedClientIPNets) != 1 {
+		t.Fatalf("unexpected cloudflare configuration %#v", value)
+	}
+}
+
+func TestLoadRejectsCloudflareWithoutTrustedNets(t *testing.T) {
+	values := map[string]string{"MT_CLOUDFLARE_LOCATION_HEADERS": "true"}
+	if _, err := load(func(name string) string { return values[name] }); err == nil {
+		t.Fatal("expected cloudflare-without-nets rejection")
+	}
+}

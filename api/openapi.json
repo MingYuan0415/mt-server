@@ -290,7 +290,8 @@
             "timezone": "Etc/UTC",
             "source": "device",
             "provider": "example",
-            "precision": "city"
+            "precision": "city",
+            "location_key": "9f4a2b3c8d1e5f06"
           },
           "fetched_at": "2026-08-02T02:00:00Z",
           "updated_at": "2026-08-02T01:55:00Z",
@@ -329,7 +330,8 @@
             "country": "EX",
             "source": "device",
             "provider": "example",
-            "precision": "city"
+            "precision": "city",
+            "location_key": "9f4a2b3c8d1e5f06"
           },
           "fetched_at": "2026-08-02T02:00:00Z",
           "updated_at": "2026-08-02T01:55:00Z",
@@ -369,7 +371,8 @@
             "country": "EX",
             "source": "device",
             "provider": "example",
-            "precision": "city"
+            "precision": "city",
+            "location_key": "9f4a2b3c8d1e5f06"
           },
           "fetched_at": "2026-08-02T02:00:00Z",
           "updated_at": "2026-08-02T01:55:00Z",
@@ -417,7 +420,8 @@
             "country": "EX",
             "source": "device",
             "provider": "example",
-            "precision": "city"
+            "precision": "city",
+            "location_key": "9f4a2b3c8d1e5f06"
           },
           "fetched_at": "2026-08-02T02:00:00Z",
           "updated_at": "2026-08-02T01:58:00Z",
@@ -457,7 +461,8 @@
             "timezone": "Etc/UTC",
             "source": "ip",
             "provider": "maxmind",
-            "precision": "coarse"
+            "precision": "coarse",
+            "location_key": "9f4a2b3c8d1e5f06"
           },
           "accuracy_radius_km": 50
         }
@@ -497,7 +502,8 @@
           "timezone": { "type": "string" },
           "source": { "type": "string", "enum": ["device", "ip"] },
           "provider": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,31}$" },
-          "precision": { "type": "string", "enum": ["city", "coarse"] }
+          "precision": { "type": "string", "enum": ["city", "coarse"] },
+          "location_key": { "type": "string", "pattern": "^[a-f0-9]{16}$", "maxLength": 16, "description": "Opaque scope identity derived deterministically by the server from the normalized 0.1-degree grid. It does not contain coordinates or the client IP, is stable for the same grid, and changes when the grid changes. Devices should compare this value to detect location-scope changes; display fields are for presentation only." }
         }
       },
       "LocationResponse": {

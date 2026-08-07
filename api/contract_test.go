@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -83,10 +84,27 @@ func TestOpenAPIContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	locationKeyPattern := regexp.MustCompile(`^[a-f0-9]{16}$`)
+	for name, example := range examples {
+		value, ok := example.(map[string]any)["value"].(map[string]any)
+		if !ok {
+			t.Fatalf("example %s has no value", name)
+		}
+		location, ok := value["location"].(map[string]any)
+		if !ok {
+			t.Fatalf("example %s has no location object", name)
+		}
+		key, ok := location["location_key"].(string)
+		if !ok || !locationKeyPattern.MatchString(key) {
+			t.Errorf("example %s location_key must be 16 lowercase hex digits, got %#v",
+				name, key)
+		}
+	}
 	for _, required := range []string{
 		`"id":"qweather"`, `"name":"QWeather"`, "https://www.qweather.com/",
 		`"source":"device"`, `"provider":"example"`, `"truncated":false`,
 		`"source":"ip"`, `"provider":"maxmind"`, `"accuracy_radius_km":50`,
+		`"location_key":"9f4a2b3c8d1e5f06"`,
 	} {
 		if !strings.Contains(string(exampleJSON), required) {
 			t.Errorf("OpenAPI examples are missing %q", required)

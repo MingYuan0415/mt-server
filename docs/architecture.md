@@ -30,20 +30,23 @@ schema v4 状态包含 Argon2id 管理员验证器、管理 HTTPS Origin、QWeat
 ```text
 Bearer 认证
   -> 解析 X-MT-Location-* 请求头（全有或全无）
-  -> 无位置头时按可信客户端 IP 推断位置
-  -> 校验并归一化到 0.1 度网格
+  -> 无位置头时读取可信直连代理的 Cloudflare 访客位置头
+  -> 仍无位置时按可信客户端 IP 推断位置
+  -> 校验并归一化到 0.1 度网格，派生 location_key
   -> 按 DeviceID 限制位置网格跳变
   -> 查询或命中 QWeather 缓存
-  -> 返回当前请求的显示元数据，不返回坐标或 IP
+  -> 返回当前请求的显示元数据与 location_key，不返回坐标或 IP
 ```
 
-纬度、经度和位置来源标识需要同时提供或同时省略；只提供一部分按客户端错误处理。城市、地区、国家和时区可选。服务器不读取任意转发头（如 `X-Forwarded-For`）、代理位置头或查询参数，也不发起位置解析网络请求；未配置可信客户端 IP 头时，IP 推断使用直连对端地址，该地址从不记录或返回。
+纬度、经度和位置来源标识需要同时提供或同时省略；只提供一部分按客户端错误处理。城市、地区、国家和时区可选。服务器不读取任意转发头（如 `X-Forwarded-For`）或查询参数，也不发起位置解析网络请求；配置了 `MT_CLOUDFLARE_LOCATION_HEADERS` 时只读取网段内直连代理提供的 Cloudflare 访客位置头，其余请求一律忽略这些头。未配置可信客户端 IP 头时，IP 推断使用直连对端地址，该地址从不记录或返回。
 
-省略位置头时，若进程配置了 `MT_GEOIP_DB`，`internal/providers/geoip` 会查询本地 GeoLite2 City 数据库，返回 `source: "ip"`、`precision: "coarse"` 的归一化点；该结果只存在内存，不落盘。可信客户端 IP 头是可选配置：配置 `MT_TRUSTED_CLIENT_IP_HEADER` 与 `MT_TRUSTED_CLIENT_IP_NETS` 时，客户端 IP 只从网段内直连代理提供的该头读取，其余请求使用连接对端地址；头值严格解析为单个 IP，多值或非法值直接拒绝。未配置可信头时使用直连对端地址，该地址从不记录或返回。私有、环回、链路本地、CGNAT 和特殊用途网段不可定位。MMDB 文件由外部 `geoipupdate` 原子替换，Store 每 5 分钟检测文件变化并热重载。
+省略位置头时，若配置了 `MT_CLOUDFLARE_LOCATION_HEADERS=true`，`internal/platform/location` 的 Cloudflare 解析器只从 `MT_TRUSTED_CLIENT_IP_NETS` 内直连代理读取 `CF-IPLatitude`/`CF-IPLongitude` 坐标对（城市等为可选显示元数据），返回 `source: "ip"`、`provider: "cloudflare"`、`precision: "coarse"` 的归一化点；坐标对出现但缺失、重复或非法时直接 `location_unavailable`，不降级。若进程配置了 `MT_GEOIP_DB`，未出现 Cloudflare 坐标对时 `internal/providers/geoip` 会查询本地 GeoLite2 City 数据库，返回 `source: "ip"`、`precision: "coarse"` 的归一化点；该结果只存在内存，不落盘。可信客户端 IP 头是可选配置：配置 `MT_TRUSTED_CLIENT_IP_HEADER` 与 `MT_TRUSTED_CLIENT_IP_NETS` 时，客户端 IP 只从网段内直连代理提供的该头读取，其余请求使用连接对端地址；头值严格解析为单个 IP，多值或非法值直接拒绝。未配置可信头时使用直连对端地址，该地址从不记录或返回。私有、环回、链路本地、CGNAT 和特殊用途网段不可定位。MMDB 文件由外部 `geoipupdate` 原子替换，Store 每 5 分钟检测文件变化并热重载。
+
+归一化完成后，`location.Point.Key` 由规范网格字符串（`"lat,lon"` 一位小数）的 FNV-1a 64 哈希派生成 16 位小写十六进制 `location_key`。它不直接包含坐标或 IP，同一网格恒定、网格变化时变化，不随 GeoIP 热重载变化；该值无密钥、网格空间可枚举，是稳定的不透明作用域标识而非密码学匿名化。天气缓存键与限速键仍使用规范网格字符串，`location_key` 只是同一网格的额外派生，不改变缓存和限速行为。
 
 Bearer token 持有者可以声明任意合法位置。每个 DeviceID 的位置变更令牌桶容量为 4，每 5 分钟恢复 1 次；同一网格不计数，超限返回 `429`。内存 LRU 最多保存 64 个位置，天气数据按网格、种类、语言和单位隔离；显示元数据始终来自当前请求，不跨请求缓存。
 
-`GET /api/v1/location` 使用同一位置解析逻辑，返回城市、地区、国家、时区和可选 `accuracy_radius_km`，不返回 IP 或坐标。天气接口在推断不可用时返回 `503 location_unavailable`。
+`GET /api/v1/location` 使用同一位置解析逻辑，返回城市、地区、国家、时区、可选 `accuracy_radius_km` 和 `location_key`，不返回 IP 或坐标。天气接口在推断不可用时返回 `503 location_unavailable`。
 
 ## 动态运行时
 

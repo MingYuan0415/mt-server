@@ -58,6 +58,7 @@ func (r *runtime) Test(_ context.Context, _ state.State,
 		},
 		Location: weather.PublicLocation{
 			City: "Example", Source: "browser", Provider: "browser", Precision: "coarse",
+			LocationKey: "9f4a2b3c8d1e5f06",
 		},
 		TestedAt:  now,
 		UpdatedAt: now.Add(-time.Minute),

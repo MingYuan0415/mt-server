@@ -93,17 +93,22 @@ type RuntimeManager struct {
 
 // NewRuntimeManager constructs an unconfigured runtime. geoIPDBPath enables
 // IP-inference; trustedHeader and trustedNets configure the trusted-proxy
-// contract for the client-IP header.
+// contract for the client-IP header; cloudflareHeaders enables Cloudflare
+// visitor-location headers as an inference source.
 func NewRuntimeManager(logger *slog.Logger, geoIPDBPath, trustedHeader string,
-	trustedNets []netip.Prefix) *RuntimeManager {
+	trustedNets []netip.Prefix, cloudflareHeaders bool) *RuntimeManager {
 	var geoIPStore *geoip.Store
 	if geoIPDBPath != "" {
 		geoIPStore = geoip.New(geoIPDBPath, logger)
 	}
 	var source *location.Source
-	if geoIPStore != nil {
-		source = location.NewSource(
-			location.NewIPExtractor(trustedHeader, trustedNets), geoIPStore)
+	if geoIPStore != nil || cloudflareHeaders {
+		var cloudflare *location.Cloudflare
+		if cloudflareHeaders {
+			cloudflare = location.NewCloudflare(trustedNets)
+		}
+		source = location.NewSourceWithCloudflare(
+			location.NewIPExtractor(trustedHeader, trustedNets), geoIPStore, cloudflare)
 	} else {
 		source = location.NewSource(nil, nil)
 	}
@@ -425,6 +430,7 @@ func publicLocation(point location.Point) weather.PublicLocation {
 	return weather.PublicLocation{
 		City: point.City, Region: point.Region, Country: point.Country, Timezone: point.Timezone,
 		Source: point.Source, Provider: point.Provider, Precision: point.Precision,
+		LocationKey: point.Key,
 	}
 }
 

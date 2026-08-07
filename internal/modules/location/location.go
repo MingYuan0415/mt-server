@@ -28,6 +28,9 @@ type PublicLocation struct {
 	Source    string `json:"source"`
 	Provider  string `json:"provider"`
 	Precision string `json:"precision"`
+	// LocationKey is the opaque grid-scope identity derived from the
+	// normalized 0.1-degree grid. It never contains coordinates or the IP.
+	LocationKey string `json:"location_key,omitempty"`
 }
 
 // Module exposes the device location API through the shared module lifecycle.
@@ -81,13 +84,14 @@ func (m *Module) handle(w http.ResponseWriter, r *http.Request) {
 	httpapi.WriteJSON(w, http.StatusOK, Response{
 		SchemaVersion: 1,
 		Location: PublicLocation{
-			City:      point.City,
-			Region:    point.Region,
-			Country:   point.Country,
-			Timezone:  point.Timezone,
-			Source:    point.Source,
-			Provider:  point.Provider,
-			Precision: point.Precision,
+			City:        point.City,
+			Region:      point.Region,
+			Country:     point.Country,
+			Timezone:    point.Timezone,
+			Source:      point.Source,
+			Provider:    point.Provider,
+			Precision:   point.Precision,
+			LocationKey: point.Key,
 		},
 		AccuracyRadiusKm: resolved.AccuracyKm,
 	})

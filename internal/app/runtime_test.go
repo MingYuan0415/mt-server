@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"io"
@@ -25,7 +26,7 @@ import (
 )
 
 func TestRuntimeTransitionsFromSetupToConfigured(t *testing.T) {
-	runtime := NewRuntimeManager(slog.New(slog.NewTextHandler(io.Discard, nil)), "", "", nil)
+	runtime := NewRuntimeManager(slog.New(slog.NewTextHandler(io.Discard, nil)), "", "", nil, false)
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/weather/current", nil)
 	recorder := httptest.NewRecorder()
 	runtime.ServeHTTP(recorder, request)
@@ -74,13 +75,13 @@ func TestRuntimeTransitionsFromSetupToConfigured(t *testing.T) {
 func TestRuntimeRejectsInvalidPersistentState(t *testing.T) {
 	value := validRuntimeState(t)
 	value.QWeather.APIHost = "weather.example.com"
-	if err := NewRuntimeManager(slog.Default(), "", "", nil).Apply(value); err == nil {
+	if err := NewRuntimeManager(slog.Default(), "", "", nil, false).Apply(value); err == nil {
 		t.Fatal("expected invalid QWeather host error")
 	}
 }
 
 func TestRuntimeReplacementStartsFreshDiagnostics(t *testing.T) {
-	runtime := NewRuntimeManager(slog.New(slog.NewTextHandler(io.Discard, nil)), "", "", nil)
+	runtime := NewRuntimeManager(slog.New(slog.NewTextHandler(io.Discard, nil)), "", "", nil, false)
 	value := validRuntimeState(t)
 	if err := runtime.Apply(value); err != nil {
 		t.Fatal(err)
@@ -114,7 +115,7 @@ func TestRuntimeReplacementStartsFreshDiagnostics(t *testing.T) {
 
 func TestRuntimeRequiresTemporaryConfigurationTestLocation(t *testing.T) {
 	value := validRuntimeState(t)
-	runtime := NewRuntimeManager(slog.Default(), "", "", nil)
+	runtime := NewRuntimeManager(slog.Default(), "", "", nil, false)
 	if _, _, err := runtime.Test(context.Background(), value, nil); !errors.Is(err, location.ErrRequired) {
 		t.Fatalf("expected missing test location error, got %v", err)
 	}
@@ -122,7 +123,7 @@ func TestRuntimeRequiresTemporaryConfigurationTestLocation(t *testing.T) {
 
 func TestRuntimeRejectsInvalidTemporaryLocationBeforeUpstreamCall(t *testing.T) {
 	value := validRuntimeState(t)
-	runtime := NewRuntimeManager(slog.Default(), "", "", nil)
+	runtime := NewRuntimeManager(slog.Default(), "", "", nil, false)
 	for _, point := range []*location.Point{
 		{Latitude: 91, Longitude: 114},
 		{Latitude: 22, Longitude: 114, City: strings.Repeat("x", 129)},
@@ -167,7 +168,7 @@ func validRuntimeState(t *testing.T) state.State {
 }
 
 func TestRuntimeRegistersAuthenticatedLocationEndpoint(t *testing.T) {
-	runtime := NewRuntimeManager(slog.New(slog.NewTextHandler(io.Discard, nil)), "", "", nil)
+	runtime := NewRuntimeManager(slog.New(slog.NewTextHandler(io.Discard, nil)), "", "", nil, false)
 	value := validRuntimeState(t)
 	if err := runtime.Apply(value); err != nil {
 		t.Fatal(err)
@@ -200,7 +201,7 @@ func TestRuntimeRegistersAuthenticatedLocationEndpoint(t *testing.T) {
 func TestRuntimeLocationInferenceWithMissingDatabase(t *testing.T) {
 	runtime := NewRuntimeManager(slog.New(slog.NewTextHandler(io.Discard, nil)),
 		filepath.Join(t.TempDir(), "missing.mmdb"), "CF-Connecting-IP",
-		[]netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")})
+		[]netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}, false)
 	value := validRuntimeState(t)
 	if err := runtime.Apply(value); err != nil {
 		t.Fatal(err)
@@ -222,5 +223,48 @@ func TestRuntimeLocationInferenceWithMissingDatabase(t *testing.T) {
 	if recorder.Code != http.StatusServiceUnavailable ||
 		!strings.Contains(recorder.Body.String(), "location_unavailable") {
 		t.Fatalf("unexpected location response %d %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestRuntimeLocationInferenceFromTrustedCloudflareHeaders(t *testing.T) {
+	runtime := NewRuntimeManager(slog.New(slog.NewTextHandler(io.Discard, nil)), "", "",
+		[]netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}, true)
+	value := validRuntimeState(t)
+	if err := runtime.Apply(value); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := runtime.Close(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}()
+
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/location", nil)
+	request.RemoteAddr = "10.1.2.3:1234"
+	request.Header.Set("Authorization", "Bearer high-entropy-device-token-for-tests")
+	request.Header.Set("CF-IPLatitude", "22.5431")
+	request.Header.Set("CF-IPLongitude", "114.0579")
+	recorder := httptest.NewRecorder()
+	runtime.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("unexpected location response %d %s", recorder.Code, recorder.Body.String())
+	}
+	var response map[string]any
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	publicLocation := response["location"].(map[string]any)
+	if publicLocation["source"] != "ip" || publicLocation["provider"] != "cloudflare" ||
+		publicLocation["precision"] != "coarse" {
+		t.Fatalf("unexpected location %#v", publicLocation)
+	}
+	key, _ := publicLocation["location_key"].(string)
+	if len(key) != 16 {
+		t.Fatalf("unexpected location key %q", key)
+	}
+	if strings.Contains(recorder.Body.String(), "22.5") || strings.Contains(recorder.Body.String(), "114.1") {
+		t.Fatalf("response leaked grid coordinates: %s", recorder.Body.String())
 	}
 }

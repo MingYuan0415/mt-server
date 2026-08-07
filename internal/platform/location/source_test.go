@@ -79,3 +79,74 @@ func TestSourceMapsInferenceFailuresToUnavailable(t *testing.T) {
 		}
 	}
 }
+
+func TestSourcePrefersExplicitHeadersOverCloudflare(t *testing.T) {
+	source := NewSourceWithCloudflare(nil, nil, NewCloudflare(trustedNets))
+	request := trustedCloudflareRequest()
+	request.Header.Set(HeaderLatitude, "30.1")
+	request.Header.Set(HeaderLongitude, "120.1")
+	request.Header.Set(HeaderProvider, "ipinfo")
+	point, _, err := source.EffectivePoint(request)
+	if err != nil || point.Source != "device" || point.Provider != "ipinfo" {
+		t.Fatalf("unexpected explicit result %#v %v", point, err)
+	}
+}
+
+func TestSourceUsesCloudflareBeforeResolver(t *testing.T) {
+	resolver := &fakeResolver{resolved: Resolved{Point: Point{Latitude: 1, Longitude: 1,
+		Source: "ip", Provider: "maxmind", Precision: "coarse"}}}
+	source := NewSourceWithCloudflare(nil, resolver, NewCloudflare(trustedNets))
+	point, _, err := source.EffectivePoint(trustedCloudflareRequest())
+	if err != nil || point.Provider != "cloudflare" {
+		t.Fatalf("expected cloudflare source, got %#v %v", point, err)
+	}
+}
+
+func TestSourceFailsClosedOnMalformedCloudflare(t *testing.T) {
+	resolver := &fakeResolver{resolved: Resolved{Point: Point{Latitude: 1, Longitude: 1,
+		Source: "ip", Provider: "maxmind", Precision: "coarse"}}}
+	source := NewSourceWithCloudflare(nil, resolver, NewCloudflare(trustedNets))
+	request := trustedCloudflareRequest()
+	request.Header.Del(CloudflareHeaderLongitude)
+	if _, _, err := source.EffectivePoint(request); !errors.Is(err, ErrLocationUnavailable) {
+		t.Fatalf("malformed cloudflare bundle must fail closed, got %v", err)
+	}
+}
+
+func TestSourceFallsBackToResolverWithoutCloudflareHeaders(t *testing.T) {
+	resolver := &fakeResolver{resolved: Resolved{Point: Point{Latitude: 22.5431,
+		Longitude: 114.0579, City: "IP City", Source: "ip", Provider: "maxmind",
+		Precision: "coarse"}}}
+	source := NewSourceWithCloudflare(NewIPExtractor("", nil), resolver, NewCloudflare(trustedNets))
+	request := httptest.NewRequest(http.MethodGet, "https://api.example.com/", nil)
+	request.RemoteAddr = "10.1.2.3:54321"
+	point, _, err := source.EffectivePoint(request)
+	if err != nil || point.Provider != "maxmind" || point.Key == "" {
+		t.Fatalf("expected resolver fallback, got %#v %v", point, err)
+	}
+}
+
+func TestSourceCloudflareOnlyRequiresHeaders(t *testing.T) {
+	source := NewSourceWithCloudflare(nil, nil, NewCloudflare(trustedNets))
+	if !source.Enabled() {
+		t.Fatal("cloudflare-only source must report enabled")
+	}
+	request := httptest.NewRequest(http.MethodGet, "https://api.example.com/", nil)
+	request.RemoteAddr = "10.1.2.3:54321"
+	if _, _, err := source.EffectivePoint(request); !errors.Is(err, ErrLocationUnavailable) {
+		t.Fatalf("missing cloudflare headers must be unavailable, got %v", err)
+	}
+}
+
+func TestSourceUntrustedCloudflareHeadersAreIgnored(t *testing.T) {
+	resolver := &fakeResolver{resolved: Resolved{Point: Point{Latitude: 22.5431,
+		Longitude: 114.0579, City: "IP City", Source: "ip", Provider: "maxmind",
+		Precision: "coarse"}}}
+	source := NewSourceWithCloudflare(NewIPExtractor("", nil), resolver, NewCloudflare(trustedNets))
+	request := trustedCloudflareRequest()
+	request.RemoteAddr = "192.0.2.44:1234"
+	point, _, err := source.EffectivePoint(request)
+	if err != nil || point.Provider != "maxmind" {
+		t.Fatalf("untrusted headers must be ignored, got %#v %v", point, err)
+	}
+}
