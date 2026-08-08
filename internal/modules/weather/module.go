@@ -15,16 +15,22 @@ import (
 
 // Module exposes the weather service through the shared module lifecycle.
 type Module struct {
-	service *Service
-	limiter *location.ChangeLimiter
-	source  *location.Source
-	logger  *slog.Logger
+	service         *Service
+	limiter         *location.ChangeLimiter
+	localizer       location.Localizer
+	localizeLimiter *location.LocalizeLimiter
+	source          *location.Source
+	logger          *slog.Logger
 }
 
-// NewModule constructs the weather HTTP module.
+// NewModule constructs the weather HTTP module. localizer and localizeLimiter
+// are optional; display localization runs only when both are present,
+// otherwise the request metadata is returned unchanged.
 func NewModule(service *Service, limiter *location.ChangeLimiter,
+	localizer location.Localizer, localizeLimiter *location.LocalizeLimiter,
 	source *location.Source, logger *slog.Logger) *Module {
-	return &Module{service: service, limiter: limiter, source: source, logger: logger}
+	return &Module{service: service, limiter: limiter, localizer: localizer,
+		localizeLimiter: localizeLimiter, source: source, logger: logger}
 }
 
 // Name returns the health registry name.
@@ -80,8 +86,27 @@ func (m *Module) handle(kind Kind) http.HandlerFunc {
 				"location_rate_limited", "device location changed too frequently")
 			return
 		}
+		// Best-effort display localization runs concurrently with the weather
+		// fetch so a slow upstream lookup never serializes behind the fetch.
+		// The goroutine is always joined before the handler returns so a
+		// runtime swap can never close the provider while the lookup is in
+		// flight.
+		var localized chan localizedResult
+		var cancelLocalize context.CancelFunc
+		if m.localizer != nil && m.localizeLimiter != nil {
+			localizeCtx, cancel := context.WithTimeout(r.Context(), location.LocalizationTimeout)
+			cancelLocalize = cancel
+			localized = make(chan localizedResult, 1)
+			go func() {
+				localized <- m.localizeAttempt(localizeCtx, principal.DeviceID, point)
+			}()
+		}
 		envelope, err := m.service.Get(r.Context(), kind, point)
 		if err != nil {
+			if cancelLocalize != nil {
+				cancelLocalize()
+				<-localized
+			}
 			status := http.StatusServiceUnavailable
 			code := "weather_unavailable"
 			message := "weather data is temporarily unavailable"
@@ -95,6 +120,38 @@ func (m *Module) handle(kind Kind) http.HandlerFunc {
 			httpapi.WriteError(w, r, status, code, message)
 			return
 		}
+		if cancelLocalize != nil {
+			value := <-localized
+			cancelLocalize()
+			point, _ = location.ApplyLocalized(point, value.metadata)
+		}
+		envelope.Location = PublicLocation{
+			City: point.City, Region: point.Region, Country: point.Country,
+			Timezone: point.Timezone, Source: point.Source, Provider: point.Provider,
+			Precision: point.Precision, LocationKey: point.Key,
+		}
 		httpapi.WriteJSON(w, http.StatusOK, envelope)
 	}
+}
+
+type localizedResult struct {
+	metadata location.LocalizedMetadata
+}
+
+func (m *Module) localizeAttempt(ctx context.Context, deviceID string,
+	point location.Point) localizedResult {
+	if m.localizeLimiter != nil {
+		release, ok := m.localizeLimiter.Try(deviceID)
+		if !ok {
+			return localizedResult{}
+		}
+		defer release()
+	}
+	metadata, err := m.localizer.Localize(ctx, point)
+	if err != nil {
+		m.logger.Debug("display localization failed, using request metadata",
+			"request_id", httpapi.RequestID(ctx), "error", err)
+		return localizedResult{}
+	}
+	return localizedResult{metadata: metadata}
 }

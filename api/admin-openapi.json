@@ -276,7 +276,7 @@
           "status": { "type": "string", "enum": ["ok", "saved"] },
           "public_key_fingerprint": { "type": "string" },
           "verification": { "$ref": "#/components/schemas/Verification" },
-          "tested_capabilities": { "type": "array", "prefixItems": [{ "const": "current" }, { "const": "alerts" }], "minItems": 2, "maxItems": 2 }
+          "tested_capabilities": { "type": "array", "items": { "enum": ["current", "alerts", "geo_lookup"] }, "minItems": 2, "maxItems": 3 }
         }
       },
       "SetupResponse": {
@@ -288,7 +288,7 @@
           "device": { "type": "object" },
           "qweather_public_key_fingerprint": { "type": "string" },
           "verification": { "$ref": "#/components/schemas/Verification" },
-          "tested_capabilities": { "type": "array", "prefixItems": [{ "const": "current" }, { "const": "alerts" }], "minItems": 2, "maxItems": 2 }
+          "tested_capabilities": { "type": "array", "items": { "enum": ["current", "alerts", "geo_lookup"] }, "minItems": 2, "maxItems": 3 }
         }
       },
       "DiagnosticsResponse": {

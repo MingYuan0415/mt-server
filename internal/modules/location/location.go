@@ -11,14 +11,6 @@ import (
 	"github.com/MingYuan0415/mt-server/internal/platform/location"
 )
 
-// Response is the display-safe device-facing location response. It never
-// contains the source IP or coordinates.
-type Response struct {
-	SchemaVersion    int            `json:"schema_version"`
-	Location         PublicLocation `json:"location"`
-	AccuracyRadiusKm *int           `json:"accuracy_radius_km,omitempty"`
-}
-
 // PublicLocation contains coarse display metadata only.
 type PublicLocation struct {
 	City      string `json:"city,omitempty"`
@@ -33,14 +25,35 @@ type PublicLocation struct {
 	LocationKey string `json:"location_key,omitempty"`
 }
 
-// Module exposes the device location API through the shared module lifecycle.
-type Module struct {
-	source *location.Source
+// Localization attributes display names when they were localized by an
+// upstream provider, satisfying the provider attribution requirement.
+type Localization struct {
+	ID             string `json:"id"`
+	Name           string `json:"name"`
+	AttributionURL string `json:"attribution_url"`
 }
 
-// NewModule constructs the location HTTP module.
-func NewModule(source *location.Source) *Module {
-	return &Module{source: source}
+// Response is the display-safe device-facing location response. It never
+// contains the source IP or coordinates.
+type Response struct {
+	SchemaVersion    int            `json:"schema_version"`
+	Location         PublicLocation `json:"location"`
+	AccuracyRadiusKm *int           `json:"accuracy_radius_km,omitempty"`
+	Localization     *Localization  `json:"localization,omitempty"`
+}
+
+// Module exposes the device location API through the shared module lifecycle.
+type Module struct {
+	source          *location.Source
+	localizer       location.Localizer
+	localizeLimiter *location.LocalizeLimiter
+}
+
+// NewModule constructs the location HTTP module. localizer and
+// localizeLimiter are optional; localization runs only when both are present.
+func NewModule(source *location.Source, localizer location.Localizer,
+	localizeLimiter *location.LocalizeLimiter) *Module {
+	return &Module{source: source, localizer: localizer, localizeLimiter: localizeLimiter}
 }
 
 // Name returns the health registry name.
@@ -61,7 +74,8 @@ func (m *Module) Ready() error { return nil }
 func (m *Module) Close(context.Context) error { return nil }
 
 func (m *Module) handle(w http.ResponseWriter, r *http.Request) {
-	if _, ok := auth.PrincipalFromContext(r.Context()); !ok {
+	principal, ok := auth.PrincipalFromContext(r.Context())
+	if !ok {
 		httpapi.WriteError(w, r, http.StatusUnauthorized,
 			"unauthorized", "authentication required")
 		return
@@ -81,18 +95,37 @@ func (m *Module) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	httpapi.WriteJSON(w, http.StatusOK, Response{
+	response := Response{
 		SchemaVersion: 1,
 		Location: PublicLocation{
-			City:        point.City,
-			Region:      point.Region,
-			Country:     point.Country,
-			Timezone:    point.Timezone,
-			Source:      point.Source,
-			Provider:    point.Provider,
-			Precision:   point.Precision,
-			LocationKey: point.Key,
+			City: point.City, Region: point.Region, Country: point.Country,
+			Timezone: point.Timezone, Source: point.Source, Provider: point.Provider,
+			Precision: point.Precision, LocationKey: point.Key,
 		},
 		AccuracyRadiusKm: resolved.AccuracyKm,
-	})
+	}
+	if m.localizer != nil && m.localizeLimiter != nil {
+		release, ok := m.localizeLimiter.Try(principal.DeviceID)
+		if ok {
+			defer release()
+			ctx, cancel := context.WithTimeout(r.Context(), location.LocalizationTimeout)
+			metadata, localizeErr := m.localizer.Localize(ctx, point)
+			cancel()
+			if localizeErr == nil {
+				point, changed := location.ApplyLocalized(point, metadata)
+				if changed {
+					response.Location = PublicLocation{
+						City: point.City, Region: point.Region, Country: point.Country,
+						Timezone: point.Timezone, Source: point.Source, Provider: point.Provider,
+						Precision: point.Precision, LocationKey: point.Key,
+					}
+					response.Localization = &Localization{
+						ID: "qweather", Name: "QWeather",
+						AttributionURL: "https://www.qweather.com/",
+					}
+				}
+			}
+		}
+	}
+	httpapi.WriteJSON(w, http.StatusOK, response)
 }

@@ -106,6 +106,17 @@ volumes:
 - MMDB 由外部官方 `geoipupdate` 维护：账户凭据放入只对更新任务可见的配置，数据库写入独立私有卷（应用只读挂载）。应用每 5 分钟检测文件替换并热重载，无需重启。
 - GeoLite2 数据受 MaxMind 许可约束，包含署名义务；不要把 MMDB 打包进公开镜像。
 
+## 中文显示名称本地化
+
+配置 QWeather 后，天气四个接口和 `GET /api/v1/location` 会尽力把显示名称本地化为中文：活动 Provider 通过 GeoAPI 城市搜索（`/geo/v2/city/lookup?location=经度,纬度&number=1&lang=zh`）按归一化 `0.1°` 网格坐标反查，`name` 映射为 `city`、`adm1` 映射为 `region`、`tz` 映射为 `timezone`，`country` 保持 ISO 代码。坐标只在网格精度内发送，请求不携带、不记录或返回原始坐标。
+
+- 这是尽力而为的显示增强：GeoAPI 失败、超时（3 秒）、每设备调用预算（容量 20、每 5 分钟恢复 1）或全局 4 个在途上限耗尽时，响应回退设备头、Cloudflare 头或 GeoLite2 返回的名称，天气可用性不受影响。
+- GeoAPI 数据按 QWeather 许可不缓存、不批量存储；每次请求实时查询，并按次计费。频繁轮询天气接口的设备会持续产生 GeoAPI 调用，请结合设备流量评估费用。
+- `lang=zh` 只保证有中文覆盖的地点返回中文；海外地点可能按官方语言或英文回退。区县边界附近的 `0.1°` 网格反查结果可能与设备实际位置略有偏差。
+- `GET /api/v1/location` 仅在本地化成功且确有显示字段被覆盖时返回可选 `localization` 对象（QWeather 与官网链接）；展示位置名称的设备/界面必须可见署名，天气响应的 QWeather 归属在 `source` 中。
+- 本地化失败不会打开天气熔断：GeoAPI 返回的 `401/403` 或 `429`（HTTP 状态或响应体代码）只回退名称，不影响天气可用性。
+- 管理界面 QWeather 验证成功后 `tested_capabilities` 会额外包含 `geo_lookup`（仅当该位置反查成功且确有显示字段被覆盖）。
+
 ## Cloudflare 访客位置头
 
 Cloudflare 的“托管转换 → 添加访问者位置标头（Add visitor location headers）”会向源站请求添加 `CF-IPLatitude`、`CF-IPLongitude`、`CF-IPCity`、`CF-Region`、`CF-IPCountry` 和 `CF-Timezone`。启用该转换后，服务可按以下方式解析，无需本地 MMDB：

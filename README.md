@@ -12,6 +12,7 @@
 - 使用 Bearer token 鉴权，支持最多 32 个命名令牌、重叠轮换和撤销。
 - 校验请求位置并归一化到 `0.1` 度网格，不记录或返回坐标和客户端 IP。
 - 可选 GeoLite2 City 本地 IP 推断：设备省略位置头时按公网出口位置查询天气，并提供 `/api/v1/location` 返回粗粒度城市元数据。
+- 通过 QWeather GeoAPI 尽力把显示名称本地化为中文，支持失败回退与调用预算保护。
 - 按位置网格隔离 LRU 内存缓存，支持并发刷新合并和陈旧数据降级。
 - 按鉴权主体限制短时间位置跳变，保护上游配额。
 - 使用 Argon2id 管理员密码、内存 session、同源校验、CSRF 和全局登录限速。
@@ -85,6 +86,8 @@ curl https://api.example.com/api/v1/weather/current \
 位置头必须同时提供或同时省略：只提供其中一部分会返回 `400 invalid_location`。省略全部位置头时，如果部署配置了可信 Cloudflare 访客位置头（`MT_CLOUDFLARE_LOCATION_HEADERS=true`）或 GeoLite2 数据库，服务会根据设备公网出口 IP 推断粗粒度位置（`source: "ip"`、`precision: "coarse"`），并照常归一化、限速和缓存；可信客户端 IP 头为可选配置，未配置时使用直连对端地址（隧道部署建议配置以获取真实公网 IP）。推断不可用时返回 `503 location_unavailable`；未配置任何推断时，天气接口对无位置头请求返回 `400 location_required`，`/api/v1/location` 返回 `503 location_unavailable`。
 
 `GET /api/v1/location` 返回将用于天气请求的位置（显式头优先，否则为 IP 推断结果），只包含城市、地区、国家、时区、来源、提供方、精度、可选 `accuracy_radius_km` 和 `location_key`，从不返回 IP 或坐标。`location_key` 是由服务端按 0.1° 网格确定性派生的 16 位小写十六进制不透明标识，不直接包含坐标或 IP，同一网格恒定，网格变化时变化；它不是密码学匿名化——网格空间可枚举，仅作为位置作用域身份比较的依据（显示字段仅供展示）。设备可在无 GPS 时用该端点获取自身所在城市，再决定是否需要显式位置头。
+
+配置 QWeather 后，天气与位置响应的显示名称会尽力本地化为中文（通过 GeoAPI 按归一化坐标反查，`city`/`region`/`timezone` 覆盖，`country` 保持 ISO 代码）。本地化实时查询、不做缓存：失败、超时或超出每设备调用预算时回退请求自身名称，天气可用性不受影响；`/api/v1/location` 仅在本地化成功且确有显示字段被覆盖时附带 `localization` 归属对象，展示名称的界面需可见署名 QWeather。海外地点可能按当地官方语言或英文回退。
 
 天气接口在缺少全部位置头且未配置推断时返回 `400 location_required`，非法内容返回 `400 invalid_location`，位置变化超限返回 `429 location_rate_limited`；`/api/v1/location` 对无位置头且无推断请求返回 `503 location_unavailable`。完整请求、响应和错误契约见 [`api/openapi.json`](api/openapi.json)。
 

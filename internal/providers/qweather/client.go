@@ -213,21 +213,33 @@ func (c *Client) Close() error {
 
 func (c *Client) request(ctx context.Context, path string,
 	point location.Point) ([]byte, error) {
+	query := url.Values{}
+	query.Set("location", strconv.FormatFloat(point.Longitude, 'f', 1, 64)+","+
+		strconv.FormatFloat(point.Latitude, 'f', 1, 64))
+	query.Set("lang", c.language)
+	query.Set("unit", c.unit)
+	return c.requestWithQuery(ctx, path, query, true)
+}
+
+// requestWithQuery performs a signed GET against the account-specific API
+// host with an explicit query, retrying once on network and server errors.
+// circuitOnFailure allows credentials and rate-limit failures to open the
+// shared circuit so weather readiness reflects account-level problems;
+// best-effort lookups pass false so that an endpoint-level rejection (for
+// example an account without GeoAPI, or GeoAPI rate limiting) cannot poison
+// weather availability.
+func (c *Client) requestWithQuery(ctx context.Context, path string,
+	query url.Values, circuitOnFailure bool) ([]byte, error) {
 	if err := c.Ready(); err != nil {
 		return nil, err
 	}
 
 	endpoint := *c.baseURL
 	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + path
-	query := endpoint.Query()
-	query.Set("location", strconv.FormatFloat(point.Longitude, 'f', 1, 64)+","+
-		strconv.FormatFloat(point.Latitude, 'f', 1, 64))
-	query.Set("lang", c.language)
-	query.Set("unit", c.unit)
 	endpoint.RawQuery = query.Encode()
 
 	for attempt := 0; attempt < 2; attempt++ {
-		body, retry, err := c.requestOnce(ctx, endpoint.String())
+		body, retry, err := c.requestOnce(ctx, endpoint.String(), circuitOnFailure)
 		if err == nil {
 			return body, nil
 		}
@@ -241,7 +253,8 @@ func (c *Client) request(ctx context.Context, path string,
 	return nil, errors.New("qweather request failed")
 }
 
-func (c *Client) requestOnce(ctx context.Context, endpoint string) ([]byte, bool, error) {
+func (c *Client) requestOnce(ctx context.Context, endpoint string,
+	circuitOnFailure bool) ([]byte, bool, error) {
 	token, err := c.signer.token()
 	if err != nil {
 		return nil, false, fmt.Errorf("sign qweather request: %w", err)
@@ -267,7 +280,13 @@ func (c *Client) requestOnce(ctx context.Context, endpoint string) ([]byte, bool
 	defer response.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(response.Body, maxResponseSize+1))
 	if err != nil {
-		return nil, true, fmt.Errorf("read qweather response: %w", err)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, false, ctxErr
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			return nil, true, fmt.Errorf("qweather response timed out: %w", context.DeadlineExceeded)
+		}
+		return nil, true, errors.New("qweather response read failed")
 	}
 	if len(body) > maxResponseSize {
 		return nil, false, errors.New("qweather response exceeds 1 MiB")
@@ -275,7 +294,9 @@ func (c *Client) requestOnce(ctx context.Context, endpoint string) ([]byte, bool
 
 	if response.StatusCode == http.StatusTooManyRequests {
 		delay := retryAfter(response.Header.Get("Retry-After"), c.now())
-		c.blockFor(delay)
+		if circuitOnFailure {
+			c.blockFor(delay)
+		}
 		return nil, false, &UpstreamError{HTTPStatus: response.StatusCode,
 			Class: ErrorRateLimit, Delay: delay}
 	}
@@ -284,9 +305,12 @@ func (c *Client) requestOnce(ctx context.Context, endpoint string) ([]byte, bool
 			Class: ErrorBadRequest, Delay: badRequestRetryDelay}
 	}
 	if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
-		c.blockFor(c.circuitCooldown)
+		delay := c.circuitCooldown
+		if circuitOnFailure {
+			c.blockFor(delay)
+		}
 		return nil, false, &UpstreamError{HTTPStatus: response.StatusCode,
-			Class: ErrorCredentials, Delay: c.circuitCooldown}
+			Class: ErrorCredentials, Delay: delay}
 	}
 	if response.StatusCode >= 500 {
 		return nil, true, &UpstreamError{HTTPStatus: response.StatusCode, Class: ErrorServer}
@@ -308,11 +332,15 @@ func (c *Client) requestOnce(ctx context.Context, endpoint string) ([]byte, bool
 		} else if status.Code == "401" || status.Code == "403" {
 			errorValue.Class = ErrorCredentials
 			errorValue.Delay = c.circuitCooldown
-			c.blockFor(c.circuitCooldown)
+			if circuitOnFailure {
+				c.blockFor(c.circuitCooldown)
+			}
 		} else if status.Code == "429" {
 			errorValue.Class = ErrorRateLimit
 			errorValue.Delay = retryAfter(response.Header.Get("Retry-After"), c.now())
-			c.blockFor(errorValue.Delay)
+			if circuitOnFailure {
+				c.blockFor(errorValue.Delay)
+			}
 		} else if strings.HasPrefix(status.Code, "5") {
 			errorValue.Class = ErrorServer
 			retry = true

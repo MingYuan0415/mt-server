@@ -284,10 +284,10 @@
             "attribution_url": "https://www.qweather.com/"
           },
           "location": {
-            "city": "Example City",
-            "region": "Example Region",
-            "country": "EX",
-            "timezone": "Etc/UTC",
+            "city": "深圳市",
+            "region": "广东省",
+            "country": "CN",
+            "timezone": "Asia/Shanghai",
             "source": "device",
             "provider": "example",
             "precision": "city",
@@ -451,20 +451,25 @@
         }
       },
       "LocationResponse": {
-        "summary": "IP-inferred device location",
+        "summary": "IP-inferred device location with localized display names",
         "value": {
           "schema_version": 1,
           "location": {
-            "city": "Example City",
-            "region": "Example Region",
-            "country": "EX",
-            "timezone": "Etc/UTC",
+            "city": "深圳市",
+            "region": "广东省",
+            "country": "CN",
+            "timezone": "Asia/Shanghai",
             "source": "ip",
             "provider": "maxmind",
             "precision": "coarse",
             "location_key": "9f4a2b3c8d1e5f06"
           },
-          "accuracy_radius_km": 50
+          "accuracy_radius_km": 50,
+          "localization": {
+            "id": "qweather",
+            "name": "QWeather",
+            "attribution_url": "https://www.qweather.com/"
+          }
         }
       }
     },
@@ -496,10 +501,10 @@
         "type": "object",
         "required": ["source", "provider", "precision"],
         "properties": {
-          "city": { "type": "string" },
-          "region": { "type": "string" },
-          "country": { "type": "string" },
-          "timezone": { "type": "string" },
+          "city": { "type": "string", "description": "Display-only locality name; the server may overlay a localized name from the configured weather provider, otherwise the device-supplied or IP-inferred value is echoed back." },
+          "region": { "type": "string", "description": "Display-only region name; may be localized like city." },
+          "country": { "type": "string", "description": "ISO 3166 alpha-2 country code; never localized." },
+          "timezone": { "type": "string", "description": "IANA timezone; may be localized like city." },
           "source": { "type": "string", "enum": ["device", "ip"] },
           "provider": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,31}$" },
           "precision": { "type": "string", "enum": ["city", "coarse"] },
@@ -512,7 +517,17 @@
         "properties": {
           "schema_version": { "type": "integer", "const": 1 },
           "location": { "$ref": "#/components/schemas/Location" },
-          "accuracy_radius_km": { "type": "integer", "minimum": 1 }
+          "accuracy_radius_km": { "type": "integer", "minimum": 1 },
+          "localization": {
+            "type": "object",
+            "description": "Attribution for display names that were localized by an upstream provider. Present only when localization succeeded and at least one display field was actually replaced; clients that render the location names must visibly attribute this source.",
+            "required": ["id", "name", "attribution_url"],
+            "properties": {
+              "id": { "type": "string", "const": "qweather" },
+              "name": { "type": "string", "const": "QWeather" },
+              "attribution_url": { "type": "string", "format": "uri" }
+            }
+          }
         }
       },
       "CurrentWeather": {

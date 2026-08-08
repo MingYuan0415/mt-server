@@ -1,12 +1,15 @@
 package locationmod
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/MingYuan0415/mt-server/internal/platform/auth"
 	"github.com/MingYuan0415/mt-server/internal/platform/location"
@@ -95,6 +98,98 @@ func TestLocationModuleReportsUnavailableWithoutInference(t *testing.T) {
 	}
 }
 
+func TestLocationModuleLocalizesDisplayNamesWithAttribution(t *testing.T) {
+	accuracy := 50
+	resolved := location.Resolved{
+		Point: location.Point{
+			Latitude: 22.5431, Longitude: 114.0579, City: "Shenzhen",
+			Region: "Guangdong", Country: "CN", Timezone: "Asia/Shanghai",
+			Source: "ip", Provider: "maxmind", Precision: "coarse",
+		},
+		AccuracyKm: &accuracy,
+	}
+	handler := testLocationHandlerWithLocalizer(&fakeResolver{resolved: resolved},
+		&fakeLocalizer{metadata: location.LocalizedMetadata{
+			City: "深圳市", Region: "广东省",
+		}}, location.NewLocalizeLimiter(4, time.Minute, 4))
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet,
+		"https://api.example.com/api/v1/location", nil)
+	request.Header.Set("Authorization", "Bearer "+testDeviceToken)
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var response map[string]any
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	publicLocation := response["location"].(map[string]any)
+	if publicLocation["city"] != "深圳市" || publicLocation["region"] != "广东省" ||
+		publicLocation["country"] != "CN" || publicLocation["source"] != "ip" ||
+		publicLocation["provider"] != "maxmind" || publicLocation["precision"] != "coarse" {
+		t.Fatalf("unexpected localized location %#v", publicLocation)
+	}
+	localization := response["localization"].(map[string]any)
+	if localization["id"] != "qweather" || localization["name"] != "QWeather" ||
+		localization["attribution_url"] != "https://www.qweather.com/" {
+		t.Fatalf("unexpected localization attribution %#v", localization)
+	}
+}
+
+func TestLocationModuleOmitsAttributionWithoutLocalization(t *testing.T) {
+	accuracy := 50
+	resolved := location.Resolved{
+		Point: location.Point{
+			Latitude: 22.5431, Longitude: 114.0579, City: "Shenzhen",
+			Source: "ip", Provider: "maxmind", Precision: "coarse",
+		},
+		AccuracyKm: &accuracy,
+	}
+	budgetLimiter := location.NewLocalizeLimiter(1, time.Minute, 4)
+	release, ok := budgetLimiter.Try("default")
+	if !ok {
+		t.Fatal("budget pre-drain was rejected")
+	}
+	release()
+	identical := location.Resolved{
+		Point: location.Point{
+			Latitude: 22.5431, Longitude: 114.0579, City: "Shenzhen",
+			Region: "Guangdong", Timezone: "Asia/Shanghai",
+			Source: "ip", Provider: "maxmind", Precision: "coarse",
+		},
+		AccuracyKm: &accuracy,
+	}
+	handlers := map[string]http.Handler{
+		"failure": testLocationHandlerWithLocalizer(&fakeResolver{resolved: resolved},
+			&fakeLocalizer{err: errors.New("geo unavailable")},
+			location.NewLocalizeLimiter(4, time.Minute, 4)),
+		"budget": testLocationHandlerWithLocalizer(&fakeResolver{resolved: resolved},
+			&fakeLocalizer{metadata: location.LocalizedMetadata{City: "深圳市"}},
+			budgetLimiter),
+		"identical": testLocationHandlerWithLocalizer(&fakeResolver{resolved: identical},
+			&fakeLocalizer{metadata: location.LocalizedMetadata{
+				City: "Shenzhen", Region: "Guangdong", Timezone: "Asia/Shanghai",
+			}}, location.NewLocalizeLimiter(4, time.Minute, 4)),
+	}
+	for name, handler := range handlers {
+		t.Run(name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodGet,
+				"https://api.example.com/api/v1/location", nil)
+			request.Header.Set("Authorization", "Bearer "+testDeviceToken)
+			handler.ServeHTTP(recorder, request)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("unexpected status %d: %s", recorder.Code, recorder.Body.String())
+			}
+			if strings.Contains(recorder.Body.String(), "localization") ||
+				strings.Contains(recorder.Body.String(), "深圳市") {
+				t.Fatalf("localization must not appear when skipped: %s", recorder.Body.String())
+			}
+		})
+	}
+}
+
 func TestLocationModuleRejectsInferenceFailures(t *testing.T) {
 	handler := testLocationHandler(&fakeResolver{err: location.ErrLocationUnavailable})
 	recorder := httptest.NewRecorder()
@@ -176,8 +271,27 @@ func testLocationHandler(resolver location.Resolver) http.Handler {
 }
 
 func testLocationHandlerWithSource(source *location.Source) http.Handler {
-	module := NewModule(source)
+	module := NewModule(source, nil, nil)
 	mux := http.NewServeMux()
 	module.RegisterRoutes(mux)
 	return auth.New(testDeviceToken).Wrap(mux)
+}
+
+func testLocationHandlerWithLocalizer(resolver location.Resolver,
+	localizer location.Localizer, limiter *location.LocalizeLimiter) http.Handler {
+	source := location.NewSource(location.NewIPExtractor("", nil), resolver)
+	module := NewModule(source, localizer, limiter)
+	mux := http.NewServeMux()
+	module.RegisterRoutes(mux)
+	return auth.New(testDeviceToken).Wrap(mux)
+}
+
+type fakeLocalizer struct {
+	metadata location.LocalizedMetadata
+	err      error
+}
+
+func (f *fakeLocalizer) Localize(_ context.Context,
+	_ location.Point) (location.LocalizedMetadata, error) {
+	return f.metadata, f.err
 }

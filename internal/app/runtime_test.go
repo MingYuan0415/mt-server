@@ -116,7 +116,7 @@ func TestRuntimeReplacementStartsFreshDiagnostics(t *testing.T) {
 func TestRuntimeRequiresTemporaryConfigurationTestLocation(t *testing.T) {
 	value := validRuntimeState(t)
 	runtime := NewRuntimeManager(slog.Default(), "", "", nil, false)
-	if _, _, err := runtime.Test(context.Background(), value, nil); !errors.Is(err, location.ErrRequired) {
+	if _, _, _, err := runtime.Test(context.Background(), value, nil); !errors.Is(err, location.ErrRequired) {
 		t.Fatalf("expected missing test location error, got %v", err)
 	}
 }
@@ -129,7 +129,7 @@ func TestRuntimeRejectsInvalidTemporaryLocationBeforeUpstreamCall(t *testing.T) 
 		{Latitude: 22, Longitude: 114, City: strings.Repeat("x", 129)},
 		{Latitude: 22, Longitude: 114, Region: "bad\tregion"},
 	} {
-		if _, _, err := runtime.Test(context.Background(), value, point); !errors.Is(err, location.ErrInvalid) {
+		if _, _, _, err := runtime.Test(context.Background(), value, point); !errors.Is(err, location.ErrInvalid) {
 			t.Fatalf("expected invalid test location error, got %v", err)
 		}
 	}

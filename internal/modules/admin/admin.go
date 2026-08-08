@@ -41,7 +41,7 @@ var (
 
 // Runtime applies validated state to the live device API.
 type Runtime interface {
-	Test(context.Context, state.State, *location.Point) (weather.Verification, string, error)
+	Test(context.Context, state.State, *location.Point) (weather.Verification, []string, string, error)
 	Prepare(state.State) (platform.PreparedChange, error)
 	PrepareTokens([]state.DeviceToken) (platform.PreparedChange, error)
 	Ready() error
@@ -241,7 +241,7 @@ func (h *Handler) setup(w http.ResponseWriter, r *http.Request) {
 		Cache:         state.DefaultCache(),
 		DeviceTokens:  []state.DeviceToken{tokenState},
 	}
-	verification, fingerprint, err := h.testCandidate(r, value, request.QWeather.TestLocation)
+	verification, capabilities, fingerprint, err := h.testCandidate(r, value, request.QWeather.TestLocation)
 	if err != nil {
 		h.writeTestError(w, r, err, false)
 		return
@@ -290,7 +290,7 @@ func (h *Handler) setup(w http.ResponseWriter, r *http.Request) {
 		"device":                          publicToken(tokenState),
 		"qweather_public_key_fingerprint": fingerprint,
 		"verification":                    verification,
-		"tested_capabilities":             []string{"current", "alerts"},
+		"tested_capabilities":             capabilities,
 	})
 }
 
@@ -376,14 +376,14 @@ func (h *Handler) testQWeather(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	value.QWeather = qweatherState(request, value.QWeather.PrivateKeyPEM)
-	verification, fingerprint, err := h.testCandidate(r, value, request.TestLocation)
+	verification, capabilities, fingerprint, err := h.testCandidate(r, value, request.TestLocation)
 	if err != nil {
 		h.writeTestError(w, r, err, false)
 		return
 	}
 	httpapi.WriteJSON(w, http.StatusOK, map[string]any{
 		"status": "ok", "public_key_fingerprint": fingerprint, "verification": verification,
-		"tested_capabilities": []string{"current", "alerts"},
+		"tested_capabilities": capabilities,
 	})
 }
 
@@ -401,7 +401,7 @@ func (h *Handler) putQWeather(w http.ResponseWriter, r *http.Request) {
 	candidate := previous
 	candidate.QWeather = qweatherState(request, previous.QWeather.PrivateKeyPEM)
 	candidate.UpdatedAt = time.Now().UTC()
-	verification, fingerprint, err := h.testCandidate(r, candidate, request.TestLocation)
+	verification, capabilities, fingerprint, err := h.testCandidate(r, candidate, request.TestLocation)
 	if err != nil {
 		h.writeTestError(w, r, err, true)
 		return
@@ -419,7 +419,7 @@ func (h *Handler) putQWeather(w http.ResponseWriter, r *http.Request) {
 	h.logger.Info("QWeather settings updated")
 	httpapi.WriteJSON(w, http.StatusOK, map[string]any{
 		"status": "saved", "public_key_fingerprint": fingerprint, "verification": verification,
-		"tested_capabilities": []string{"current", "alerts"},
+		"tested_capabilities": capabilities,
 	})
 }
 
@@ -820,31 +820,31 @@ func (h *Handler) loadState(w http.ResponseWriter, r *http.Request) (state.State
 }
 
 func (h *Handler) testCandidate(r *http.Request, value state.State,
-	testLocation *testLocationInput) (weather.Verification, string, error) {
+	testLocation *testLocationInput) (weather.Verification, []string, string, error) {
 	select {
 	case h.testSlot <- struct{}{}:
 		defer func() { <-h.testSlot }()
 	default:
-		return weather.Verification{}, "", errQWeatherTestBusy
+		return weather.Verification{}, nil, "", errQWeatherTestBusy
 	}
 	if !h.testLimit.Allow() {
-		return weather.Verification{}, "", errQWeatherTestRateLimited
+		return weather.Verification{}, nil, "", errQWeatherTestRateLimited
 	}
 	testContext, cancel := context.WithTimeout(r.Context(), 25*time.Second)
 	defer cancel()
 	if testLocation == nil || testLocation.Latitude == nil || testLocation.Longitude == nil {
-		return weather.Verification{}, "", location.ErrRequired
+		return weather.Verification{}, nil, "", location.ErrRequired
 	}
 	point := &location.Point{
 		Latitude: *testLocation.Latitude, Longitude: *testLocation.Longitude,
 		City: testLocation.City, Region: testLocation.Region,
 		Country: testLocation.Country, Timezone: testLocation.Timezone,
 	}
-	verification, fingerprint, err := h.runtime.Test(testContext, value, point)
+	verification, capabilities, fingerprint, err := h.runtime.Test(testContext, value, point)
 	if err != nil {
 		h.logger.Warn("QWeather configuration test failed", "error", err)
 	}
-	return verification, fingerprint, err
+	return verification, capabilities, fingerprint, err
 }
 
 func (h *Handler) writeTestError(w http.ResponseWriter, r *http.Request, err error, retained bool) {

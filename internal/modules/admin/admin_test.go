@@ -26,6 +26,7 @@ import (
 type fakeRuntime struct {
 	testError        error
 	testCalls        int
+	testCapabilities []string
 	applied          state.State
 	tokens           []state.DeviceToken
 	testPoint        *location.Point
@@ -48,7 +49,7 @@ func (f *fakePreparedChange) Activate() {
 func (f *fakePreparedChange) Discard() { f.activate = nil }
 
 func (f *fakeRuntime) Test(_ context.Context, _ state.State,
-	point *location.Point) (weather.Verification, string, error) {
+	point *location.Point) (weather.Verification, []string, string, error) {
 	f.testCalls++
 	f.testPoint = point
 	if f.testStarted != nil {
@@ -58,7 +59,11 @@ func (f *fakeRuntime) Test(_ context.Context, _ state.State,
 		}
 		<-f.testRelease
 	}
-	return testVerification(), "test-fingerprint", f.testError
+	capabilities := f.testCapabilities
+	if capabilities == nil {
+		capabilities = []string{"current", "alerts"}
+	}
+	return testVerification(), capabilities, "test-fingerprint", f.testError
 }
 func (f *fakeRuntime) Prepare(value state.State) (platform.PreparedChange, error) {
 	return &fakePreparedChange{activate: func() { f.applied = value }}, nil
@@ -644,6 +649,53 @@ func TestPublicManagementWriteRequiresPreAuthenticationCSRF(t *testing.T) {
 	handler.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusForbidden || !strings.Contains(recorder.Body.String(), "csrf_rejected") {
 		t.Fatalf("setup without CSRF returned %d %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestQWeatherManagementTestPropagatesCapabilities(t *testing.T) {
+	handler, _, runtime, publicCSRF := newTestHandler(t)
+	setup := performSetup(t, handler, publicCSRF)
+	var setupBody map[string]any
+	if err := json.Unmarshal(setup.Body.Bytes(), &setupBody); err != nil {
+		t.Fatal(err)
+	}
+	cookie := setup.Result().Cookies()[0]
+	csrf := setupBody["csrf_token"].(string)
+	input := qweatherInput{
+		APIHost: "account.re.qweatherapi.com", ProjectID: "project",
+		CredentialID: "credential", TestLocation: validTestLocation(),
+	}
+
+	runtime.testCapabilities = []string{"current", "alerts", "geo_lookup"}
+	result := authenticatedRequest(t, handler, http.MethodPost,
+		"/admin/api/v1/settings/qweather/test", input, cookie, csrf)
+	if result.Code != http.StatusOK {
+		t.Fatalf("management test failed: %d %s", result.Code, result.Body.String())
+	}
+	var response map[string]any
+	if err := json.Unmarshal(result.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	capabilities, ok := response["tested_capabilities"].([]any)
+	if !ok || len(capabilities) != 3 ||
+		capabilities[0] != "current" || capabilities[1] != "alerts" ||
+		capabilities[2] != "geo_lookup" {
+		t.Fatalf("tested capabilities were not propagated: %#v", response["tested_capabilities"])
+	}
+
+	runtime.testCapabilities = nil
+	result = authenticatedRequest(t, handler, http.MethodPost,
+		"/admin/api/v1/settings/qweather/test", input, cookie, csrf)
+	if result.Code != http.StatusOK {
+		t.Fatalf("second management test failed: %d %s", result.Code, result.Body.String())
+	}
+	if err := json.Unmarshal(result.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	capabilities, ok = response["tested_capabilities"].([]any)
+	if !ok || len(capabilities) != 2 ||
+		capabilities[0] != "current" || capabilities[1] != "alerts" {
+		t.Fatalf("geo_lookup must be omitted when not verified: %#v", response["tested_capabilities"])
 	}
 }
 

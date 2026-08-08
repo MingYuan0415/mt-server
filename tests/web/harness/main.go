@@ -47,9 +47,9 @@ func (p *preparedChange) Activate() {
 func (p *preparedChange) Discard() { p.activate = nil }
 
 func (r *runtime) Test(_ context.Context, _ state.State,
-	point *location.Point) (weather.Verification, string, error) {
+	point *location.Point) (weather.Verification, []string, string, error) {
 	if point == nil {
-		return weather.Verification{}, "", location.ErrRequired
+		return weather.Verification{}, nil, "", location.ErrRequired
 	}
 	now := time.Date(2026, 8, 2, 2, 0, 0, 0, time.UTC)
 	return weather.Verification{
@@ -67,7 +67,7 @@ func (r *runtime) Test(_ context.Context, _ state.State,
 			ConditionCode: "101", ConditionText: "多云", HumidityPercent: 72,
 			WindSpeedKMH: 8,
 		},
-	}, "test-public-key-fingerprint", nil
+	}, []string{"current", "alerts"}, "test-public-key-fingerprint", nil
 }
 
 func (r *runtime) Prepare(state.State) (platform.PreparedChange, error) {

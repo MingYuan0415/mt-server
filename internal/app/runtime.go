@@ -28,6 +28,10 @@ const (
 	maximumDeviceTokens   = 32
 	locationBurstCapacity = 4
 	locationRefillPeriod  = 5 * time.Minute
+
+	localizeBudgetCapacity = 20
+	localizeRefillPeriod   = 5 * time.Minute
+	localizeInFlightMax    = 4
 )
 
 var identifierPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
@@ -76,6 +80,7 @@ func (p *preparedTokenChange) Activate() {
 	}
 	p.manager.mu.Unlock()
 	p.manager.limiter.Retain(p.deviceIDs)
+	p.manager.localizeLimiter.Retain(p.deviceIDs)
 	p.handler = nil
 }
 
@@ -83,12 +88,13 @@ func (p *preparedTokenChange) Discard() { p.handler = nil }
 
 // RuntimeManager owns the active weather, location, and device-auth snapshot.
 type RuntimeManager struct {
-	mu      sync.RWMutex
-	current *runtimeInstance
-	logger  *slog.Logger
-	limiter *location.ChangeLimiter
-	geoIP   *geoip.Store
-	source  *location.Source
+	mu              sync.RWMutex
+	current         *runtimeInstance
+	logger          *slog.Logger
+	limiter         *location.ChangeLimiter
+	localizeLimiter *location.LocalizeLimiter
+	geoIP           *geoip.Store
+	source          *location.Source
 }
 
 // NewRuntimeManager constructs an unconfigured runtime. geoIPDBPath enables
@@ -113,10 +119,11 @@ func NewRuntimeManager(logger *slog.Logger, geoIPDBPath, trustedHeader string,
 		source = location.NewSource(nil, nil)
 	}
 	return &RuntimeManager{
-		logger:  logger,
-		limiter: location.NewChangeLimiter(locationBurstCapacity, locationRefillPeriod),
-		geoIP:   geoIPStore,
-		source:  source,
+		logger:          logger,
+		limiter:         location.NewChangeLimiter(locationBurstCapacity, locationRefillPeriod),
+		localizeLimiter: location.NewLocalizeLimiter(localizeBudgetCapacity, localizeRefillPeriod, localizeInFlightMax),
+		geoIP:           geoIPStore,
+		source:          source,
 	}
 }
 
@@ -169,42 +176,56 @@ func (m *RuntimeManager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // Test verifies a complete candidate with one uncached current-weather call.
+// The returned capability list describes what was verified, including the
+// optional geo_lookup display-name localization. Localization failures never
+// fail the verification because weather is the required capability.
 func (m *RuntimeManager) Test(ctx context.Context, value state.State,
-	testPoint *location.Point) (weather.Verification, string, error) {
+	testPoint *location.Point) (weather.Verification, []string, string, error) {
 	provider, _, _, err := m.buildComponents(value)
 	if err != nil {
-		return weather.Verification{}, "", err
+		return weather.Verification{}, nil, "", err
 	}
 	defer provider.Close()
 	if testPoint == nil {
-		return weather.Verification{}, "", location.ErrRequired
+		return weather.Verification{}, nil, "", location.ErrRequired
 	}
 	point, err := location.Normalize(*testPoint)
 	if err != nil {
-		return weather.Verification{}, "", err
+		return weather.Verification{}, nil, "", err
 	}
 	point.Source = "browser"
 	point.Provider = "browser"
 	point.Precision = "coarse"
 	result, err := provider.Fetch(ctx, weather.KindCurrent, point)
 	if err != nil {
-		return weather.Verification{}, "", err
+		return weather.Verification{}, nil, "", err
 	}
 	current, ok := result.Data.(weather.Current)
 	if !ok {
-		return weather.Verification{}, "", errors.New("QWeather current response has an unexpected type")
+		return weather.Verification{}, nil, "", errors.New("QWeather current response has an unexpected type")
 	}
 	if _, err := provider.Fetch(ctx, weather.KindAlerts, point); err != nil {
-		return weather.Verification{}, "", fmt.Errorf("verify QWeather alerts: %w", err)
+		return weather.Verification{}, nil, "", fmt.Errorf("verify QWeather alerts: %w", err)
 	}
 	fingerprint, err := qweather.PublicKeyFingerprint([]byte(value.QWeather.PrivateKeyPEM))
 	if err != nil {
-		return weather.Verification{}, "", err
+		return weather.Verification{}, nil, "", err
+	}
+	capabilities := []string{"current", "alerts"}
+	localizeCtx, cancel := context.WithTimeout(ctx, location.LocalizationTimeout)
+	metadata, localizeErr := provider.Localize(localizeCtx, point)
+	cancel()
+	if localizeErr == nil {
+		var changed bool
+		point, changed = location.ApplyLocalized(point, metadata)
+		if changed {
+			capabilities = append(capabilities, "geo_lookup")
+		}
 	}
 	return weather.Verification{
 		Source: provider.Source(), Location: publicLocation(point), TestedAt: time.Now().UTC(),
 		UpdatedAt: result.UpdatedAt, Data: current,
-	}, fingerprint, nil
+	}, capabilities, fingerprint, nil
 }
 
 // Apply builds and atomically activates a complete runtime.
@@ -224,8 +245,8 @@ func (m *RuntimeManager) Prepare(value state.State) (platform.PreparedChange, er
 		return nil, err
 	}
 	service := weather.NewService(provider, m.logger, options)
-	module := weather.NewModule(service, m.limiter, m.source, m.logger)
-	locationModule := locationmod.NewModule(m.source)
+	module := weather.NewModule(service, m.limiter, provider, m.localizeLimiter, m.source, m.logger)
+	locationModule := locationmod.NewModule(m.source, provider, m.localizeLimiter)
 	apiMux := http.NewServeMux()
 	module.RegisterRoutes(apiMux)
 	locationModule.RegisterRoutes(apiMux)
@@ -245,6 +266,7 @@ func (m *RuntimeManager) activate(instance *runtimeInstance, retainedDeviceIDs [
 	m.current = instance
 	m.mu.Unlock()
 	m.limiter.Retain(retainedDeviceIDs)
+	m.localizeLimiter.Retain(retainedDeviceIDs)
 	if previous != nil {
 		m.closeService(previous.service, "old weather runtime")
 	}

@@ -279,9 +279,256 @@ func (f *fakeResolver) Resolve(netip.Addr) (location.Resolved, error) {
 	return f.resolved, f.err
 }
 
+func TestModuleLocalizesDisplayNamesBestEffort(t *testing.T) {
+	now := time.Date(2026, 8, 2, 0, 0, 0, 0, time.UTC)
+	provider := &fakeProvider{fetch: successfulFetch(now)}
+	service := newTestService(provider, 64)
+	defer closeService(t, service)
+	localizer := &fakeLocalizer{metadata: location.LocalizedMetadata{
+		City: "深圳市", Region: "广东省",
+	}}
+	module := NewModule(service, location.NewChangeLimiter(4, 5*time.Minute),
+		localizer, location.NewLocalizeLimiter(4, time.Minute, 4),
+		location.NewSource(nil, nil),
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
+	mux := http.NewServeMux()
+	module.RegisterRoutes(mux)
+	handler := auth.New(testDeviceToken).Wrap(mux)
+
+	request := deviceRequest("/api/v1/weather/current")
+	request.Header.Set(location.HeaderCity, "Shenzhen")
+	request.Header.Set(location.HeaderRegion, "Guangdong")
+	request.Header.Set(location.HeaderCountry, "CN")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var response map[string]any
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	publicLocation := response["location"].(map[string]any)
+	if publicLocation["city"] != "深圳市" || publicLocation["region"] != "广东省" ||
+		publicLocation["country"] != "CN" || publicLocation["source"] != "device" ||
+		publicLocation["provider"] != "ipinfo" {
+		t.Fatalf("unexpected localized location %#v", publicLocation)
+	}
+	key, _ := publicLocation["location_key"].(string)
+	if len(key) != 16 {
+		t.Fatalf("unexpected location key %q", key)
+	}
+}
+
+func TestModuleFallsBackToRequestMetadataOnLocalizationFailure(t *testing.T) {
+	now := time.Date(2026, 8, 2, 0, 0, 0, 0, time.UTC)
+	provider := &fakeProvider{fetch: successfulFetch(now)}
+	service := newTestService(provider, 64)
+	defer closeService(t, service)
+	localizer := &fakeLocalizer{err: errors.New("geo unavailable")}
+	module := NewModule(service, location.NewChangeLimiter(4, 5*time.Minute),
+		localizer, location.NewLocalizeLimiter(4, time.Minute, 4),
+		location.NewSource(nil, nil),
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
+	mux := http.NewServeMux()
+	module.RegisterRoutes(mux)
+	handler := auth.New(testDeviceToken).Wrap(mux)
+
+	request := deviceRequest("/api/v1/weather/current")
+	request.Header.Set(location.HeaderCity, "Shenzhen")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK ||
+		!strings.Contains(recorder.Body.String(), `"city":"Shenzhen"`) {
+		t.Fatalf("localization failure must fall back: %d %s",
+			recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestModuleSkipsLocalizationWhenBudgetIsExhausted(t *testing.T) {
+	now := time.Date(2026, 8, 2, 0, 0, 0, 0, time.UTC)
+	provider := &fakeProvider{fetch: successfulFetch(now)}
+	service := newTestService(provider, 64)
+	defer closeService(t, service)
+	started := make(chan struct{})
+	localizer := &fakeLocalizer{
+		metadata: location.LocalizedMetadata{City: "深圳市"},
+		started:  started,
+	}
+	limiter := location.NewLocalizeLimiter(1, time.Minute, 4)
+	release, ok := limiter.Try("default")
+	if !ok {
+		t.Fatal("budget pre-drain was rejected")
+	}
+	release()
+	module := NewModule(service, location.NewChangeLimiter(4, 5*time.Minute),
+		localizer, limiter,
+		location.NewSource(nil, nil), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	mux := http.NewServeMux()
+	module.RegisterRoutes(mux)
+	handler := auth.New(testDeviceToken).Wrap(mux)
+
+	request := deviceRequest("/api/v1/weather/current")
+	request.Header.Set(location.HeaderCity, "Shenzhen")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK ||
+		!strings.Contains(recorder.Body.String(), `"city":"Shenzhen"`) {
+		t.Fatalf("budget exhaustion must fall back: %d %s",
+			recorder.Code, recorder.Body.String())
+	}
+	select {
+	case <-started:
+		t.Fatal("localization ran despite an exhausted budget")
+	default:
+	}
+}
+
+func TestModuleJoinsLocalizationBeforeReturningWeatherError(t *testing.T) {
+	provider := &fakeProvider{fetch: func(context.Context, Kind,
+		location.Point) (ProviderResult, error) {
+		return ProviderResult{}, errors.New("weather failed")
+	}}
+	service := newTestService(provider, 64)
+	defer closeService(t, service)
+	finished := make(chan struct{})
+	localizer := &fakeLocalizer{
+		blocked:  make(chan struct{}),
+		finished: finished,
+	}
+	module := NewModule(service, location.NewChangeLimiter(4, 5*time.Minute),
+		localizer, location.NewLocalizeLimiter(4, time.Minute, 4),
+		location.NewSource(nil, nil),
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
+	mux := http.NewServeMux()
+	module.RegisterRoutes(mux)
+	handler := auth.New(testDeviceToken).Wrap(mux)
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, deviceRequest("/api/v1/weather/current"))
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("unexpected weather error status %d: %s",
+			recorder.Code, recorder.Body.String())
+	}
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("localization goroutine was not joined before the handler returned")
+	}
+}
+
+func TestModuleBoundsLocalizationDelayForCachedWeather(t *testing.T) {
+	now := time.Date(2026, 8, 2, 0, 0, 0, 0, time.UTC)
+	provider := &fakeProvider{fetch: successfulFetch(now)}
+	service := newTestService(provider, 64)
+	service.now = func() time.Time { return now }
+	defer closeService(t, service)
+	finished := make(chan struct{})
+	localizer := &fakeLocalizer{
+		blocked:  make(chan struct{}),
+		finished: finished,
+	}
+	module := NewModule(service, location.NewChangeLimiter(4, 5*time.Minute),
+		localizer, location.NewLocalizeLimiter(4, time.Minute, 4),
+		location.NewSource(nil, nil),
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
+	mux := http.NewServeMux()
+	module.RegisterRoutes(mux)
+	handler := auth.New(testDeviceToken).Wrap(mux)
+
+	request := deviceRequest("/api/v1/weather/current")
+	request.Header.Set(location.HeaderCity, "Shenzhen")
+	recorder := httptest.NewRecorder()
+	started := time.Now()
+	handler.ServeHTTP(recorder, request)
+	elapsed := time.Since(started)
+	if recorder.Code != http.StatusOK ||
+		!strings.Contains(recorder.Body.String(), `"city":"Shenzhen"`) {
+		t.Fatalf("slow localization must not break weather: %d %s",
+			recorder.Code, recorder.Body.String())
+	}
+	if elapsed > location.LocalizationTimeout+time.Second {
+		t.Fatalf("slow localization delayed the response by %s", elapsed)
+	}
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("localization goroutine was not joined before the handler returned")
+	}
+}
+
+func TestModuleRunsLocalizationConcurrentlyWithWeatherFetch(t *testing.T) {
+	fetchStarted := make(chan struct{})
+	releaseFetch := make(chan struct{})
+	provider := &fakeProvider{fetch: func(ctx context.Context, kind Kind,
+		point location.Point) (ProviderResult, error) {
+		close(fetchStarted)
+		select {
+		case <-releaseFetch:
+		case <-ctx.Done():
+			return ProviderResult{}, ctx.Err()
+		}
+		return successfulFetch(time.Now())(ctx, kind, point)
+	}}
+	service := newTestService(provider, 64)
+	defer closeService(t, service)
+	localizeStarted := make(chan struct{})
+	localizer := &fakeLocalizer{
+		metadata: location.LocalizedMetadata{City: "深圳市"},
+		started:  localizeStarted,
+	}
+	module := NewModule(service, location.NewChangeLimiter(4, 5*time.Minute),
+		localizer, location.NewLocalizeLimiter(4, time.Minute, 4),
+		location.NewSource(nil, nil), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	mux := http.NewServeMux()
+	module.RegisterRoutes(mux)
+	handler := auth.New(testDeviceToken).Wrap(mux)
+
+	result := make(chan int, 1)
+	go func() {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, deviceRequest("/api/v1/weather/current"))
+		result <- recorder.Code
+	}()
+	<-fetchStarted
+	select {
+	case <-localizeStarted:
+	case <-time.After(time.Second):
+		close(releaseFetch)
+		t.Fatal("localization did not start while the weather fetch was in flight")
+	}
+	close(releaseFetch)
+	if code := <-result; code != http.StatusOK {
+		t.Fatalf("unexpected status %d", code)
+	}
+}
+
+type fakeLocalizer struct {
+	metadata location.LocalizedMetadata
+	err      error
+	started  chan struct{}
+	blocked  chan struct{}
+	finished chan struct{}
+}
+
+func (f *fakeLocalizer) Localize(ctx context.Context,
+	_ location.Point) (location.LocalizedMetadata, error) {
+	if f.started != nil {
+		close(f.started)
+	}
+	if f.finished != nil {
+		defer close(f.finished)
+	}
+	if f.blocked != nil {
+		<-ctx.Done()
+		return location.LocalizedMetadata{}, ctx.Err()
+	}
+	return f.metadata, f.err
+}
+
 func testDeviceHandlerWithSource(service *Service, capacity int, source *location.Source) http.Handler {
 	module := NewModule(service, location.NewChangeLimiter(capacity, 5*time.Minute),
-		source, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		nil, nil, source, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	mux := http.NewServeMux()
 	module.RegisterRoutes(mux)
 	return auth.New(testDeviceToken).Wrap(mux)
@@ -402,7 +649,7 @@ func TestModuleLifecycle(t *testing.T) {
 	provider := &fakeProvider{fetch: successfulFetch(time.Now())}
 	service := newTestService(provider, 64)
 	module := NewModule(service, location.NewChangeLimiter(4, time.Minute),
-		location.NewSource(nil, nil), slog.Default())
+		nil, nil, location.NewSource(nil, nil), slog.Default())
 	if module.Name() != "weather" || module.Start(context.Background()) != nil || module.Ready() != nil {
 		t.Fatal("unexpected module lifecycle result")
 	}
@@ -415,7 +662,7 @@ func TestModuleLifecycle(t *testing.T) {
 
 func testDeviceHandler(service *Service, capacity int) http.Handler {
 	module := NewModule(service, location.NewChangeLimiter(capacity, 5*time.Minute),
-		location.NewSource(nil, nil),
+		nil, nil, location.NewSource(nil, nil),
 		slog.New(slog.NewTextHandler(io.Discard, nil)))
 	mux := http.NewServeMux()
 	module.RegisterRoutes(mux)
