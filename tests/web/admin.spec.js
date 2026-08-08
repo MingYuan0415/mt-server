@@ -13,6 +13,15 @@ const verification = {
   }
 };
 
+const verificationWithLocation = {
+  ...verification,
+  location: {
+    ...verification.location,
+    city: "Example City", district: "Example District",
+    region: "Example Region", country: "EX"
+  }
+};
+
 const qweather = {
   api_host: "account-id.re.qweatherapi.com",
   project_id: "project-id",
@@ -133,11 +142,11 @@ async function installBackend(page, initialConfigured) {
     }
     if (path === "/settings/qweather" && method === "GET") return json(200, backend.qweather);
     if (path === "/settings/qweather/test" && method === "POST") {
-      return json(200, { status: "ok", public_key_fingerprint: qweather.public_key_fingerprint, verification });
+      return json(200, { status: "ok", public_key_fingerprint: qweather.public_key_fingerprint, verification: verificationWithLocation });
     }
     if (path === "/settings/qweather" && method === "PUT") {
       backend.qweather = { ...backend.qweather, ...request.postDataJSON(), private_key_configured: true };
-      return json(200, { status: "saved", public_key_fingerprint: qweather.public_key_fingerprint, verification });
+      return json(200, { status: "saved", public_key_fingerprint: qweather.public_key_fingerprint, verification: verificationWithLocation });
     }
     if (path === "/settings/admin-origins" && method === "GET") {
       return json(200, { mode: "direct_same_origin", maximum: 16, origins: backend.origins });
@@ -259,6 +268,7 @@ test("@desktop completes setup and rotates configuration", async ({ page }, test
   await page.getByRole("button", { name: "测试并保存" }).click();
   await expect(page.locator("#qweather-message")).toContainText("已保存并生效");
   await expect(page.locator("#qweather-verification")).toContainText("多云");
+  await expect(page.locator("#qweather-verification")).toContainText("Example City / Example District / Example Region / EX");
 
   await page.getByRole("button", { name: "管理域名" }).click();
   await page.locator('#origin-form [name="origin"]').fill("https://admin.example.com");

@@ -23,6 +23,7 @@ type Source struct {
 // PublicLocation contains coarse display metadata only.
 type PublicLocation struct {
 	City      string `json:"city,omitempty"`
+	District  string `json:"district,omitempty"`
 	Region    string `json:"region,omitempty"`
 	Country   string `json:"country,omitempty"`
 	Timezone  string `json:"timezone,omitempty"`

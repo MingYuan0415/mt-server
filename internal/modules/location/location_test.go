@@ -110,7 +110,7 @@ func TestLocationModuleLocalizesDisplayNamesWithAttribution(t *testing.T) {
 	}
 	handler := testLocationHandlerWithLocalizer(&fakeResolver{resolved: resolved},
 		&fakeLocalizer{metadata: location.LocalizedMetadata{
-			City: "深圳市", Region: "广东省",
+			City: "深圳市", District: "南山区", Region: "广东省",
 		}}, location.NewLocalizeLimiter(4, time.Minute, 4))
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet,
@@ -125,7 +125,8 @@ func TestLocationModuleLocalizesDisplayNamesWithAttribution(t *testing.T) {
 		t.Fatal(err)
 	}
 	publicLocation := response["location"].(map[string]any)
-	if publicLocation["city"] != "深圳市" || publicLocation["region"] != "广东省" ||
+	if publicLocation["city"] != "深圳市" || publicLocation["district"] != "南山区" ||
+		publicLocation["region"] != "广东省" ||
 		publicLocation["country"] != "CN" || publicLocation["source"] != "ip" ||
 		publicLocation["provider"] != "maxmind" || publicLocation["precision"] != "coarse" {
 		t.Fatalf("unexpected localized location %#v", publicLocation)
@@ -134,6 +135,40 @@ func TestLocationModuleLocalizesDisplayNamesWithAttribution(t *testing.T) {
 	if localization["id"] != "qweather" || localization["name"] != "QWeather" ||
 		localization["attribution_url"] != "https://www.qweather.com/" {
 		t.Fatalf("unexpected localization attribution %#v", localization)
+	}
+}
+
+func TestLocationModuleAttributesDistrictOnlyOverlay(t *testing.T) {
+	accuracy := 50
+	resolved := location.Resolved{
+		Point: location.Point{
+			Latitude: 22.5431, Longitude: 114.0579, City: "Shenzhen",
+			Region: "Guangdong", Country: "CN", Timezone: "Asia/Shanghai",
+			Source: "ip", Provider: "maxmind", Precision: "coarse",
+		},
+		AccuracyKm: &accuracy,
+	}
+	handler := testLocationHandlerWithLocalizer(&fakeResolver{resolved: resolved},
+		&fakeLocalizer{metadata: location.LocalizedMetadata{District: "南山区"}},
+		location.NewLocalizeLimiter(4, time.Minute, 4))
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet,
+		"https://api.example.com/api/v1/location", nil)
+	request.Header.Set("Authorization", "Bearer "+testDeviceToken)
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var response map[string]any
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	publicLocation := response["location"].(map[string]any)
+	if publicLocation["city"] != "Shenzhen" || publicLocation["district"] != "南山区" {
+		t.Fatalf("district-only overlay must keep city: %#v", publicLocation)
+	}
+	if _, ok := response["localization"]; !ok {
+		t.Fatal("district-only overlay must still produce the localization attribution")
 	}
 }
 

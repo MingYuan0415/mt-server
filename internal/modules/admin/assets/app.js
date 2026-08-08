@@ -115,8 +115,10 @@ function showVerification(id, value) {
     container.classList.add("hidden");
     return;
   }
-  const location = [value.location?.city, value.location?.region, value.location?.country]
-    .filter(Boolean).join(" / ") ||
+  const location = [
+    value.location?.city, value.location?.district,
+    value.location?.region, value.location?.country
+  ].filter(Boolean).join(" / ") ||
     (value.location?.source === "browser" ? "浏览器临时位置" : "设备提供位置");
   const items = [
     ["验证位置", location],

@@ -256,7 +256,8 @@
             "type": "object",
 			"required": ["source", "provider", "precision"],
             "properties": {
-              "city": { "type": "string" }, "region": { "type": "string" },
+              "city": { "type": "string" }, "district": { "type": "string" },
+              "region": { "type": "string" },
               "country": { "type": "string" }, "timezone": { "type": "string" },
 			  "source": { "type": "string", "const": "browser" },
 			  "provider": { "type": "string", "const": "browser" },

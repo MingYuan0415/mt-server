@@ -23,6 +23,7 @@ type geoLookupResponse struct {
 	Location []struct {
 		Name string `json:"name"`
 		Adm1 string `json:"adm1"`
+		Adm2 string `json:"adm2"`
 		Tz   string `json:"tz"`
 	} `json:"location"`
 }
@@ -59,10 +60,16 @@ func (c *Client) Localize(ctx context.Context, point location.Point) (location.L
 	}
 	matched := response.Location[0]
 	metadata := location.LocalizedMetadata{
-		City: matched.Name, Region: matched.Adm1, Timezone: matched.Tz,
+		City: matched.Adm2, District: matched.Name,
+		Region: matched.Adm1, Timezone: matched.Tz,
+	}
+	// A missing secondary administrative area (rare) degrades city to the
+	// matched locality name so the city field never loses its value.
+	if strings.TrimSpace(metadata.City) == "" {
+		metadata.City = metadata.District
 	}
 	valid := 0
-	for _, field := range []*string{&metadata.City, &metadata.Region, &metadata.Timezone} {
+	for _, field := range []*string{&metadata.City, &metadata.District, &metadata.Region, &metadata.Timezone} {
 		if value, ok := validLocalizedName(*field); ok {
 			*field = value
 			valid++

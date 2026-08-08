@@ -35,7 +35,7 @@ func TestLocalizeQueriesCityLookupWithGridCoordinates(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
 			"code":"200",
-			"location":[{"name":"东城","adm1":"北京市","tz":"Asia/Shanghai"}]
+			"location":[{"name":"东城","adm1":"北京市","adm2":"北京","tz":"Asia/Shanghai"}]
 		}`))
 	}))
 	defer server.Close()
@@ -45,8 +45,59 @@ func TestLocalizeQueriesCityLookupWithGridCoordinates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if metadata.City != "东城" || metadata.Region != "北京市" || metadata.Timezone != "Asia/Shanghai" {
+	if metadata.City != "北京" || metadata.District != "东城" ||
+		metadata.Region != "北京市" || metadata.Timezone != "Asia/Shanghai" {
 		t.Fatalf("unexpected localized metadata %#v", metadata)
+	}
+}
+
+func TestLocalizeFallsBackCityToNameWithoutAdm2(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{name: "missing", body: `{"code":"200","location":[{"name":"东城","adm1":"北京市","tz":"Asia/Shanghai"}]}`},
+		{name: "whitespace", body: `{"code":"200","location":[{"name":"东城","adm1":"北京市","adm2":"  ","tz":"Asia/Shanghai"}]}`},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			privateKeyPEM, _ := testPrivateKey(t)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(test.body))
+			}))
+			defer server.Close()
+			client := testClient(t, server.URL, privateKeyPEM)
+
+			metadata, err := client.Localize(context.Background(), location.Point{Latitude: 22.5, Longitude: 114.1})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if metadata.City != "东城" || metadata.District != "东城" {
+				t.Fatalf("empty adm2 must degrade city to the locality name: %#v", metadata)
+			}
+		})
+	}
+}
+
+func TestLocalizeClearsInvalidAdm2WithoutFallback(t *testing.T) {
+	privateKeyPEM, _ := testPrivateKey(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"code":"200",
+			"location":[{"name":"东城","adm1":"北京市","adm2":"bad\tadm2","tz":"Asia/Shanghai"}]
+		}`))
+	}))
+	defer server.Close()
+	client := testClient(t, server.URL, privateKeyPEM)
+
+	metadata, err := client.Localize(context.Background(), location.Point{Latitude: 22.5, Longitude: 114.1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metadata.City != "" || metadata.District != "东城" {
+		t.Fatalf("invalid adm2 must be cleared without degrading city: %#v", metadata)
 	}
 }
 

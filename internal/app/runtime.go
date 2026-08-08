@@ -450,7 +450,8 @@ func credentialsFromState(tokens []state.DeviceToken) ([]auth.Credential, error)
 
 func publicLocation(point location.Point) weather.PublicLocation {
 	return weather.PublicLocation{
-		City: point.City, Region: point.Region, Country: point.Country, Timezone: point.Timezone,
+		City: point.City, District: point.District, Region: point.Region,
+		Country: point.Country, Timezone: point.Timezone,
 		Source: point.Source, Provider: point.Provider, Precision: point.Precision,
 		LocationKey: point.Key,
 	}

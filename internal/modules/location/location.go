@@ -14,6 +14,7 @@ import (
 // PublicLocation contains coarse display metadata only.
 type PublicLocation struct {
 	City      string `json:"city,omitempty"`
+	District  string `json:"district,omitempty"`
 	Region    string `json:"region,omitempty"`
 	Country   string `json:"country,omitempty"`
 	Timezone  string `json:"timezone,omitempty"`
@@ -98,9 +99,9 @@ func (m *Module) handle(w http.ResponseWriter, r *http.Request) {
 	response := Response{
 		SchemaVersion: 1,
 		Location: PublicLocation{
-			City: point.City, Region: point.Region, Country: point.Country,
-			Timezone: point.Timezone, Source: point.Source, Provider: point.Provider,
-			Precision: point.Precision, LocationKey: point.Key,
+			City: point.City, District: point.District, Region: point.Region,
+			Country: point.Country, Timezone: point.Timezone, Source: point.Source,
+			Provider: point.Provider, Precision: point.Precision, LocationKey: point.Key,
 		},
 		AccuracyRadiusKm: resolved.AccuracyKm,
 	}
@@ -115,9 +116,9 @@ func (m *Module) handle(w http.ResponseWriter, r *http.Request) {
 				point, changed := location.ApplyLocalized(point, metadata)
 				if changed {
 					response.Location = PublicLocation{
-						City: point.City, Region: point.Region, Country: point.Country,
-						Timezone: point.Timezone, Source: point.Source, Provider: point.Provider,
-						Precision: point.Precision, LocationKey: point.Key,
+						City: point.City, District: point.District, Region: point.Region,
+						Country: point.Country, Timezone: point.Timezone, Source: point.Source,
+						Provider: point.Provider, Precision: point.Precision, LocationKey: point.Key,
 					}
 					response.Localization = &Localization{
 						ID: "qweather", Name: "QWeather",

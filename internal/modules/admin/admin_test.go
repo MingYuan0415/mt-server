@@ -81,7 +81,8 @@ func testVerification() weather.Verification {
 	return weather.Verification{
 		Source: weather.Source{ID: "qweather", Name: "QWeather", AttributionURL: "https://www.qweather.com/"},
 		Location: weather.PublicLocation{
-			City: "Example", Source: "browser", Provider: "browser", Precision: "coarse",
+			City: "Example", District: "Example District",
+			Source: "browser", Provider: "browser", Precision: "coarse",
 			LocationKey: "9f4a2b3c8d1e5f06",
 		},
 		TestedAt:  time.Date(2026, 8, 2, 1, 0, 0, 0, time.UTC),
@@ -108,6 +109,11 @@ func TestSetupPersistsHashedSecretsAndCreatesSession(t *testing.T) {
 	if response.CSRFToken == "" || !strings.HasPrefix(response.DeviceToken, "mt_") ||
 		len(recorder.Result().Cookies()) == 0 || response.Verification.Data.ConditionCode != "101" {
 		t.Fatalf("incomplete setup response %#v", response)
+	}
+	if response.Verification.Location.City != "Example" ||
+		response.Verification.Location.District != "Example District" {
+		t.Fatalf("setup verification must carry the display metadata: %#v",
+			response.Verification.Location)
 	}
 	loaded, err := store.Load()
 	if err != nil {

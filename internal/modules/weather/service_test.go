@@ -51,10 +51,16 @@ func TestServiceCachesAndIsolatesLocations(t *testing.T) {
 	service.now = func() time.Time { return now }
 	defer closeService(t, service)
 
-	pointA := location.Point{Latitude: 30.1, Longitude: 120.1, Source: "ip", Precision: "city"}
+	pointA := location.Point{Latitude: 30.1, Longitude: 120.1, Source: "ip", Precision: "city",
+		City: "Shenzhen", District: "Nanshan", Region: "Guangdong"}
 	pointB := location.Point{Latitude: 31.1, Longitude: 121.1, Source: "ip", Precision: "city"}
-	if _, err := service.Get(context.Background(), KindCurrent, pointA); err != nil {
+	first, err := service.Get(context.Background(), KindCurrent, pointA)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if first.Location.City != "Shenzhen" || first.Location.District != "Nanshan" ||
+		first.Location.Region != "Guangdong" {
+		t.Fatalf("envelope must carry the point display metadata: %#v", first.Location)
 	}
 	if _, err := service.Get(context.Background(), KindCurrent, pointA); err != nil {
 		t.Fatal(err)

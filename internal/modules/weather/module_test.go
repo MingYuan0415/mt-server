@@ -285,7 +285,7 @@ func TestModuleLocalizesDisplayNamesBestEffort(t *testing.T) {
 	service := newTestService(provider, 64)
 	defer closeService(t, service)
 	localizer := &fakeLocalizer{metadata: location.LocalizedMetadata{
-		City: "深圳市", Region: "广东省",
+		City: "深圳市", District: "南山区", Region: "广东省",
 	}}
 	module := NewModule(service, location.NewChangeLimiter(4, 5*time.Minute),
 		localizer, location.NewLocalizeLimiter(4, time.Minute, 4),
@@ -309,7 +309,8 @@ func TestModuleLocalizesDisplayNamesBestEffort(t *testing.T) {
 		t.Fatal(err)
 	}
 	publicLocation := response["location"].(map[string]any)
-	if publicLocation["city"] != "深圳市" || publicLocation["region"] != "广东省" ||
+	if publicLocation["city"] != "深圳市" || publicLocation["district"] != "南山区" ||
+		publicLocation["region"] != "广东省" ||
 		publicLocation["country"] != "CN" || publicLocation["source"] != "device" ||
 		publicLocation["provider"] != "ipinfo" {
 		t.Fatalf("unexpected localized location %#v", publicLocation)

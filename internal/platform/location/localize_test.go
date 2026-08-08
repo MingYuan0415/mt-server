@@ -12,9 +12,10 @@ func TestApplyLocalizedOverlaysValidatedFields(t *testing.T) {
 		Region: "Guangdong", Country: "CN", Timezone: "Asia/Shanghai",
 		Source: "ip", Provider: "maxmind", Precision: "coarse", Key: "abc"}
 	updated, changed := ApplyLocalized(point, LocalizedMetadata{
-		City: " 深圳市 ", Region: "广东省", Timezone: "Asia/Shanghai",
+		City: " 深圳市 ", District: "南山区", Region: "广东省", Timezone: "Asia/Shanghai",
 	})
-	if updated.City != "深圳市" || updated.Region != "广东省" || !changed {
+	if updated.City != "深圳市" || updated.District != "南山区" || updated.Region != "广东省" ||
+		!changed {
 		t.Fatalf("localized fields were not overlaid: %#v", updated)
 	}
 	if updated.Country != "CN" || updated.Latitude != 22.5 || updated.Longitude != 114.1 ||
@@ -22,26 +23,28 @@ func TestApplyLocalizedOverlaysValidatedFields(t *testing.T) {
 		updated.Key != "abc" {
 		t.Fatalf("localization must not alter provenance or coordinates: %#v", updated)
 	}
-	if point.City != "Shenzhen" {
+	if point.City != "Shenzhen" || point.District != "" {
 		t.Fatalf("ApplyLocalized must not mutate its input: %#v", point)
 	}
 }
 
 func TestApplyLocalizedSkipsInvalidAndEmptyFields(t *testing.T) {
-	point := Point{City: "Shenzhen", Region: "Guangdong", Timezone: "Asia/Shanghai"}
+	point := Point{City: "Shenzhen", District: "Nanshan",
+		Region: "Guangdong", Timezone: "Asia/Shanghai"}
 	updated, changed := ApplyLocalized(point, LocalizedMetadata{
-		City: " ", Region: strings.Repeat("x", 129), Timezone: "bad\tzone",
+		City: " ", District: strings.Repeat("x", 129), Region: "bad\tzone", Timezone: "",
 	})
-	if updated.City != "Shenzhen" || updated.Region != "Guangdong" ||
-		updated.Timezone != "Asia/Shanghai" || changed {
+	if updated.City != "Shenzhen" || updated.District != "Nanshan" ||
+		updated.Region != "Guangdong" || updated.Timezone != "Asia/Shanghai" || changed {
 		t.Fatalf("invalid localized values must be skipped: %#v", updated)
 	}
 }
 
 func TestApplyLocalizedReportsNoChangeForIdenticalValues(t *testing.T) {
-	point := Point{City: "深圳市", Region: "广东省", Timezone: "Asia/Shanghai"}
+	point := Point{City: "深圳市", District: "南山区",
+		Region: "广东省", Timezone: "Asia/Shanghai"}
 	_, changed := ApplyLocalized(point, LocalizedMetadata{
-		City: "深圳市", Region: "广东省", Timezone: "Asia/Shanghai",
+		City: "深圳市", District: "南山区", Region: "广东省", Timezone: "Asia/Shanghai",
 	})
 	if changed {
 		t.Fatal("identical values must not report a change")
@@ -49,6 +52,11 @@ func TestApplyLocalizedReportsNoChangeForIdenticalValues(t *testing.T) {
 	_, changed = ApplyLocalized(point, LocalizedMetadata{})
 	if changed {
 		t.Fatal("empty metadata must not report a change")
+	}
+	districtOnly := Point{City: "深圳市"}
+	updated, changed := ApplyLocalized(districtOnly, LocalizedMetadata{District: "南山区"})
+	if updated.District != "南山区" || !changed || updated.City != "深圳市" {
+		t.Fatalf("district-only overlay must report a change: %#v", updated)
 	}
 }
 

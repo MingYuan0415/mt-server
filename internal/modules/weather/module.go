@@ -126,9 +126,9 @@ func (m *Module) handle(kind Kind) http.HandlerFunc {
 			point, _ = location.ApplyLocalized(point, value.metadata)
 		}
 		envelope.Location = PublicLocation{
-			City: point.City, Region: point.Region, Country: point.Country,
-			Timezone: point.Timezone, Source: point.Source, Provider: point.Provider,
-			Precision: point.Precision, LocationKey: point.Key,
+			City: point.City, District: point.District, Region: point.Region,
+			Country: point.Country, Timezone: point.Timezone, Source: point.Source,
+			Provider: point.Provider, Precision: point.Precision, LocationKey: point.Key,
 		}
 		httpapi.WriteJSON(w, http.StatusOK, envelope)
 	}

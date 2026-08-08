@@ -11,6 +11,7 @@ import (
 // country remains the ISO code supplied by the device or inference source.
 type LocalizedMetadata struct {
 	City     string
+	District string
 	Region   string
 	Timezone string
 }
@@ -30,6 +31,10 @@ func ApplyLocalized(point Point, metadata LocalizedMetadata) (Point, bool) {
 	changed := false
 	if value, ok := validatedLocalizedField(metadata.City); ok && value != point.City {
 		point.City = value
+		changed = true
+	}
+	if value, ok := validatedLocalizedField(metadata.District); ok && value != point.District {
+		point.District = value
 		changed = true
 	}
 	if value, ok := validatedLocalizedField(metadata.Region); ok && value != point.Region {

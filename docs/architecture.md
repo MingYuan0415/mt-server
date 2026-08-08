@@ -46,9 +46,9 @@ Bearer 认证
 
 Bearer token 持有者可以声明任意合法位置。每个 DeviceID 的位置变更令牌桶容量为 4，每 5 分钟恢复 1 次；同一网格不计数，超限返回 `429`。内存 LRU 最多保存 64 个位置，天气数据按网格、种类、语言和单位隔离；显示元数据始终来自当前请求，不跨请求缓存。
 
-天气与位置接口会尽力把显示名称本地化为中文：活动 QWeather Provider 通过 `GET /geo/v2/city/lookup`（`number=1`、`lang=zh`，仅使用归一化后的 `0.1°` 网格坐标）反查地点，把 `name` 映射到 `city`、`adm1` 映射到 `region`、`tz` 映射到 `timezone`；`country` 保持 ISO 代码不变。查询成功才覆盖显示字段，`source`、`provider`、`precision`、`location_key` 与坐标获取语义不变。GeoAPI 数据按 QWeather 许可不做缓存或持久化：每次请求都实时查询，受每设备令牌桶（容量 20、每 5 分钟恢复 1）和全局 4 个在途上限约束；预算耗尽、上游失败或超过 3 秒预算时回退请求自身的元数据。天气查询与本地化查询并行执行，天气失败时先取消并等待本地化协程结束，避免运行时替换期间使用已关闭的 Provider。`GET /api/v1/location` 仅在本地化成功且确有显示字段被覆盖时返回可选 `localization` 归属对象（QWeather 及官网链接），客户端展示位置名称时必须可见署名；天气响应的 QWeather 归属已在 `source` 中。海外地点按 QWeather 多语言回退规则可能返回当地官方语言或英文名称。
+天气与位置接口会尽力把显示名称本地化为中文：活动 QWeather Provider 通过 `GET /geo/v2/city/lookup`（`number=1`、`lang=zh`，仅使用归一化后的 `0.1°` 网格坐标）反查地点，把 `adm2` 映射到 `city`（缺少时回退到 `name`）、`name` 映射到新增的 `district` 区县字段、`adm1` 映射到 `region`、`tz` 映射到 `timezone`；`country` 保持 ISO 代码不变。查询成功才覆盖显示字段，`source`、`provider`、`precision`、`location_key` 与坐标获取语义不变。GeoAPI 数据按 QWeather 许可不做缓存或持久化：每次请求都实时查询，受每设备令牌桶（容量 20、每 5 分钟恢复 1）和全局 4 个在途上限约束；预算耗尽、上游失败或超过 3 秒预算时回退请求自身的元数据。天气查询与本地化查询并行执行，天气失败时先取消并等待本地化协程结束，避免运行时替换期间使用已关闭的 Provider。`GET /api/v1/location` 仅在本地化成功且确有显示字段被覆盖时返回可选 `localization` 归属对象（QWeather 及官网链接），客户端展示位置名称时必须可见署名；天气响应的 QWeather 归属已在 `source` 中。海外地点按 QWeather 多语言回退规则可能返回当地官方语言或英文名称。
 
-`GET /api/v1/location` 使用同一位置解析逻辑，返回城市、地区、国家、时区、可选 `accuracy_radius_km` 和 `location_key`，不返回 IP 或坐标。天气接口在推断不可用时返回 `503 location_unavailable`。
+`GET /api/v1/location` 使用同一位置解析逻辑，返回城市、可选区县、地区、国家、时区、可选 `accuracy_radius_km` 和 `location_key`，不返回 IP 或坐标。天气接口在推断不可用时返回 `503 location_unavailable`。
 
 ## 动态运行时
 

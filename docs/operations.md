@@ -108,7 +108,7 @@ volumes:
 
 ## 中文显示名称本地化
 
-配置 QWeather 后，天气四个接口和 `GET /api/v1/location` 会尽力把显示名称本地化为中文：活动 Provider 通过 GeoAPI 城市搜索（`/geo/v2/city/lookup?location=经度,纬度&number=1&lang=zh`）按归一化 `0.1°` 网格坐标反查，`name` 映射为 `city`、`adm1` 映射为 `region`、`tz` 映射为 `timezone`，`country` 保持 ISO 代码。坐标只在网格精度内发送，请求不携带、不记录或返回原始坐标。
+配置 QWeather 后，天气四个接口和 `GET /api/v1/location` 会尽力把显示名称本地化为中文：活动 Provider 通过 GeoAPI 城市搜索（`/geo/v2/city/lookup?location=经度,纬度&number=1&lang=zh`）按归一化 `0.1°` 网格坐标反查，`adm2` 映射为 `city`（缺少时回退到 `name`）、`name` 映射为新增的 `district` 区县字段、`adm1` 映射为 `region`、`tz` 映射为 `timezone`，`country` 保持 ISO 代码。坐标只在网格精度内发送，请求不携带、不记录或返回原始坐标。
 
 - 这是尽力而为的显示增强：GeoAPI 失败、超时（3 秒）、每设备调用预算（容量 20、每 5 分钟恢复 1）或全局 4 个在途上限耗尽时，响应回退设备头、Cloudflare 头或 GeoLite2 返回的名称，天气可用性不受影响。
 - GeoAPI 数据按 QWeather 许可不缓存、不批量存储；每次请求实时查询，并按次计费。频繁轮询天气接口的设备会持续产生 GeoAPI 调用，请结合设备流量评估费用。

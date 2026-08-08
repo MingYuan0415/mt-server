@@ -46,6 +46,7 @@ type Point struct {
 	Latitude  float64
 	Longitude float64
 	City      string
+	District  string
 	Region    string
 	Country   string
 	Timezone  string
@@ -129,7 +130,7 @@ func Normalize(point Point) (Point, error) {
 		point.Longitude < -180 || point.Longitude > 180 {
 		return Point{}, ErrInvalid
 	}
-	for _, field := range []*string{&point.City, &point.Region, &point.Country, &point.Timezone} {
+	for _, field := range []*string{&point.City, &point.District, &point.Region, &point.Country, &point.Timezone} {
 		value, err := normalizeMetadata(*field)
 		if err != nil {
 			return Point{}, ErrInvalid

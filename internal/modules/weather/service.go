@@ -386,6 +386,7 @@ func envelopeFrom(entry *cacheEntry, point location.Point, source Source, stale 
 		Source:        source,
 		Location: PublicLocation{
 			City:        point.City,
+			District:    point.District,
 			Region:      point.Region,
 			Country:     point.Country,
 			Timezone:    point.Timezone,
