@@ -11,6 +11,6 @@
   },
   "devDependencies": {
     "@playwright/test": "1.62.1",
-    "@redocly/cli": "2.43.2"
+    "@redocly/cli": "2.44.2"
   }
 }
