@@ -115,7 +115,7 @@ QWeather 私钥、管理员密码验证器、管理域名、缓存策略和设�
 
 ## 开发与验证
 
-要求 Go 1.26.5 和 Docker Engine。管理界面端到端测试及 OpenAPI 校验另需 Node.js 22.12+；Node 依赖仅用于开发和 CI。
+要求 Go 1.26.8 和 Docker Engine。管理界面端到端测试及 OpenAPI 校验另需 Node.js 22.12+；Node 依赖仅用于开发和 CI。
 
 ```sh
 make format
