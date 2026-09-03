@@ -5,7 +5,7 @@ go 1.26.8
 require golang.org/x/crypto v0.56.0
 
 require (
-	github.com/oschwald/geoip2-golang v1.11.0
+	github.com/oschwald/geoip2-golang v1.13.0
 	golang.org/x/sys v0.47.0
 )
 
