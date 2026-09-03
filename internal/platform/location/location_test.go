@@ -26,12 +26,22 @@ func TestFromRequestParsesAndNormalizesDeviceLocation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if point.Latitude != 22.5 || point.Longitude != 114.1 || point.City != "Shenzhen" ||
+	if point.Latitude != 22.54 || point.Longitude != 114.06 || point.City != "Shenzhen" ||
 		point.Provider != "ipinfo" || point.Source != "device" || point.Precision != "city" {
 		t.Fatalf("unexpected point %#v", point)
 	}
-	if point.Key != "cc70e9b302c4b12b" {
+	if point.Key != "6d3cb7ee7a8f3f1e" {
 		t.Fatalf("unexpected location key %q", point.Key)
+	}
+}
+
+func TestNormalizeRoundsBorderCityCoordinates(t *testing.T) {
+	point, err := Normalize(Point{Latitude: 22.5431, Longitude: 114.0579})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if point.Latitude != 22.54 || point.Longitude != 114.06 {
+		t.Fatalf("Shenzhen coordinates must stay within two-decimal precision: %#v", point)
 	}
 }
 
@@ -40,25 +50,25 @@ func TestNormalizeDerivesStableLocationKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := Normalize(Point{Latitude: 22.5499, Longitude: 114.1499})
+	second, err := Normalize(Point{Latitude: 22.5449, Longitude: 114.0571})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if first.Key != second.Key || first.Key == "" {
-		t.Fatalf("same grid must derive the same key: %q vs %q", first.Key, second.Key)
+		t.Fatalf("same location must derive the same key: %q vs %q", first.Key, second.Key)
 	}
 	third, err := Normalize(Point{Latitude: 22.6, Longitude: 114.1})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if third.Key == first.Key {
-		t.Fatalf("different grid must derive a different key: %q", third.Key)
+		t.Fatalf("different location must derive a different key: %q", third.Key)
 	}
 	if len(first.Key) != 16 || first.Key != strings.ToLower(first.Key) {
 		t.Fatalf("location key must be 16 lowercase hex digits: %q", first.Key)
 	}
 	if first.Key != locationKey(first.Latitude, first.Longitude) {
-		t.Fatalf("location key must be derived from the canonical grid string: %q",
+		t.Fatalf("location key must be derived from the canonical coordinate string: %q",
 			first.Key)
 	}
 }
@@ -131,26 +141,26 @@ func TestNormalizeAcceptsCoordinateBoundariesAndCanonicalizesZero(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if zero.Key != "3e0f3d3bb294400b" {
-		t.Fatalf("negative zero must canonicalize to the zero-grid key, got %q", zero.Key)
+	if zero.Key != "90e4a580868552eb" {
+		t.Fatalf("negative zero must canonicalize to the zero coordinate key, got %q", zero.Key)
 	}
 }
 
-func TestChangeLimiterCountsOnlyGridChangesPerDevice(t *testing.T) {
+func TestChangeLimiterCountsOnlyLocationChangesPerDevice(t *testing.T) {
 	now := time.Date(2026, 8, 2, 0, 0, 0, 0, time.UTC)
 	limiter := NewChangeLimiter(2, 5*time.Minute)
 	limiter.now = func() time.Time { return now }
 	if allowed, _ := limiter.Allow("one", "22.5,114.1"); !allowed {
-		t.Fatal("initial grid was rejected")
+		t.Fatal("initial location was rejected")
 	}
 	if allowed, _ := limiter.Allow("one", "22.5,114.1"); !allowed {
-		t.Fatal("same grid was rejected")
+		t.Fatal("same location was rejected")
 	}
 	if allowed, _ := limiter.Allow("one", "22.6,114.1"); !allowed {
-		t.Fatal("burst grid change was rejected")
+		t.Fatal("burst location change was rejected")
 	}
 	if allowed, _ := limiter.Allow("one", "22.7,114.1"); !allowed {
-		t.Fatal("second burst grid change was rejected")
+		t.Fatal("second burst location change was rejected")
 	}
 	if allowed, retry := limiter.Allow("one", "22.8,114.1"); allowed || retry != 5*time.Minute {
 		t.Fatalf("unexpected exhausted result %v %v", allowed, retry)
@@ -160,14 +170,14 @@ func TestChangeLimiterCountsOnlyGridChangesPerDevice(t *testing.T) {
 	}
 	now = now.Add(5 * time.Minute)
 	if allowed, _ := limiter.Allow("one", "22.8,114.1"); !allowed {
-		t.Fatal("refilled grid change was rejected")
+		t.Fatal("refilled location change was rejected")
 	}
 }
 
 func TestChangeLimiterRetainRemovesRevokedDevices(t *testing.T) {
 	limiter := NewChangeLimiter(1, time.Hour)
 	if allowed, _ := limiter.Allow("revoked", "one"); !allowed {
-		t.Fatal("initial grid was rejected")
+		t.Fatal("initial location was rejected")
 	}
 	limiter.Retain([]string{"active"})
 	if allowed, _ := limiter.Allow("revoked", "two"); !allowed {

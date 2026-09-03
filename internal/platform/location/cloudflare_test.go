@@ -32,7 +32,7 @@ func TestCloudflareParsesTrustedHeaders(t *testing.T) {
 	if err != nil || !present {
 		t.Fatalf("unexpected result %v %v", present, err)
 	}
-	if point.Latitude != 22.5 || point.Longitude != 114.1 ||
+	if point.Latitude != 22.54 || point.Longitude != 114.06 ||
 		point.City != "Shenzhen" || point.Region != "Guangdong" ||
 		point.Country != "CN" || point.Timezone != "Asia/Shanghai" {
 		t.Fatalf("unexpected point %#v", point)
@@ -43,7 +43,7 @@ func TestCloudflareParsesTrustedHeaders(t *testing.T) {
 	if point.Key == "" || len(point.Key) != 16 {
 		t.Fatalf("unexpected location key %q", point.Key)
 	}
-	if point.Key != "cc70e9b302c4b12b" {
+	if point.Key != "6d3cb7ee7a8f3f1e" {
 		t.Fatalf("unexpected location key %q", point.Key)
 	}
 }

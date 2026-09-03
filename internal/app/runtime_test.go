@@ -265,6 +265,6 @@ func TestRuntimeLocationInferenceFromTrustedCloudflareHeaders(t *testing.T) {
 		t.Fatalf("unexpected location key %q", key)
 	}
 	if strings.Contains(recorder.Body.String(), "22.5") || strings.Contains(recorder.Body.String(), "114.1") {
-		t.Fatalf("response leaked grid coordinates: %s", recorder.Body.String())
+		t.Fatalf("response leaked coordinates: %s", recorder.Body.String())
 	}
 }

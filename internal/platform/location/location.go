@@ -1,4 +1,5 @@
-// Package location validates privacy-reduced locations supplied by authenticated devices.
+// Package location validates device-supplied locations and normalizes
+// coordinates to the two-decimal precision accepted by upstream providers.
 package location
 
 import (
@@ -17,7 +18,7 @@ import (
 )
 
 const (
-	gridScale            = 10.0
+	coordinateScale      = 100.0
 	maximumMetadataRunes = 128
 
 	HeaderLatitude  = "X-MT-Location-Latitude"
@@ -53,9 +54,9 @@ type Point struct {
 	Source    string
 	Provider  string
 	Precision string
-	// Key is the opaque grid-scope identity derived from the normalized
-	// 0.1-degree grid. It is empty until Normalize runs; callers treat an
-	// empty value as "no key".
+	// Key is the opaque scope identity derived from the normalized
+	// two-decimal coordinates. It is empty until Normalize runs; callers
+	// treat an empty value as "no key".
 	Key string
 }
 
@@ -102,27 +103,28 @@ func FromRequest(request *http.Request) (Point, bool, error) {
 	return point, true, nil
 }
 
-// CacheKey returns a privacy-reduced location key.
+// CacheKey returns the canonical location key for caches and rate limiting.
 func (p Point) CacheKey() string {
-	return gridString(p.Latitude, p.Longitude)
+	return coordinateString(p.Latitude, p.Longitude)
 }
 
-// gridString is the canonical one-decimal representation of a grid point.
-func gridString(latitude, longitude float64) string {
-	return strconv.FormatFloat(latitude, 'f', 1, 64) + "," +
-		strconv.FormatFloat(longitude, 'f', 1, 64)
+// coordinateString is the canonical two-decimal representation of a point.
+func coordinateString(latitude, longitude float64) string {
+	return strconv.FormatFloat(latitude, 'f', 2, 64) + "," +
+		strconv.FormatFloat(longitude, 'f', 2, 64)
 }
 
-// locationKey derives the opaque 16-hex grid-scope identity. It is not
-// cryptographic: the 0.1-degree grid space is enumerable, so the value must
+// locationKey derives the opaque 16-hex scope identity. It is not
+// cryptographic: the coordinate space is enumerable, so the value must
 // not be presented as anonymous. It never contains coordinates directly.
 func locationKey(latitude, longitude float64) string {
 	hasher := fnv.New64a()
-	_, _ = hasher.Write([]byte(gridString(latitude, longitude)))
+	_, _ = hasher.Write([]byte(coordinateString(latitude, longitude)))
 	return fmt.Sprintf("%016x", hasher.Sum64())
 }
 
-// Normalize validates and rounds a point to the privacy grid.
+// Normalize validates a point and rounds coordinates to the precision
+// accepted by upstream providers.
 func Normalize(point Point) (Point, error) {
 	if math.IsNaN(point.Latitude) || math.IsInf(point.Latitude, 0) ||
 		point.Latitude < -90 || point.Latitude > 90 ||
@@ -137,8 +139,8 @@ func Normalize(point Point) (Point, error) {
 		}
 		*field = value
 	}
-	point.Latitude = math.Round(point.Latitude*gridScale) / gridScale
-	point.Longitude = math.Round(point.Longitude*gridScale) / gridScale
+	point.Latitude = math.Round(point.Latitude*coordinateScale) / coordinateScale
+	point.Longitude = math.Round(point.Longitude*coordinateScale) / coordinateScale
 	if point.Latitude == 0 {
 		point.Latitude = 0
 	}
@@ -177,10 +179,11 @@ func parseCoordinate(value string, minimum, maximum float64) (float64, error) {
 type deviceBucket struct {
 	tokens  float64
 	updated time.Time
-	grid    string
+	scope   string
 }
 
-// ChangeLimiter limits how quickly one authenticated device can switch grids.
+// ChangeLimiter limits how quickly one authenticated device can move
+// between distinct normalized locations.
 type ChangeLimiter struct {
 	mu       sync.Mutex
 	capacity float64
@@ -197,17 +200,18 @@ func NewChangeLimiter(capacity int, interval time.Duration) *ChangeLimiter {
 	}
 }
 
-// Allow reports whether a device may use the requested grid and the retry delay.
-func (l *ChangeLimiter) Allow(deviceID, grid string) (bool, time.Duration) {
+// Allow reports whether a device may use the requested location and the
+// retry delay.
+func (l *ChangeLimiter) Allow(deviceID, scope string) (bool, time.Duration) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := l.now()
 	bucket, exists := l.devices[deviceID]
 	if !exists {
-		l.devices[deviceID] = &deviceBucket{tokens: l.capacity, updated: now, grid: grid}
+		l.devices[deviceID] = &deviceBucket{tokens: l.capacity, updated: now, scope: scope}
 		return true, 0
 	}
-	if bucket.grid == grid {
+	if bucket.scope == scope {
 		return true, 0
 	}
 	elapsed := now.Sub(bucket.updated)
@@ -220,7 +224,7 @@ func (l *ChangeLimiter) Allow(deviceID, grid string) (bool, time.Duration) {
 		return false, time.Duration(math.Ceil(missing * float64(l.interval)))
 	}
 	bucket.tokens--
-	bucket.grid = grid
+	bucket.scope = scope
 	return true, 0
 }
 

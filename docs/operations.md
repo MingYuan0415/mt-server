@@ -81,9 +81,9 @@ X-MT-Location-Country    (可选)
 X-MT-Location-Timezone   (可选)
 ```
 
-纬度、经度和 Provider 需要同时提供或同时省略。提供时，服务校验坐标范围、有限值、Provider 格式和可选元数据，并将坐标归一化到 `0.1` 度网格；只提供其中一部分返回 `400 invalid_location`。省略时启用 IP 推断（见下节），推断不可用返回 `503 location_unavailable`；未配置任何 IP 推断时，天气接口对无位置头请求返回 `400 location_required`，`GET /api/v1/location` 返回 `503 location_unavailable`。以上情况都不会调用 QWeather。
+纬度、经度和 Provider 需要同时提供或同时省略。提供时，服务校验坐标范围、有限值、Provider 格式和可选元数据，并将坐标归一化到两位小数（`0.01` 度）精度；只提供其中一部分返回 `400 invalid_location`。省略时启用 IP 推断（见下节），推断不可用返回 `503 location_unavailable`；未配置任何 IP 推断时，天气接口对无位置头请求返回 `400 location_required`，`GET /api/v1/location` 返回 `503 location_unavailable`。以上情况都不会调用 QWeather。
 
-服务不读取任意转发头（如 `X-Forwarded-For`）、查询参数或其他位置头；配置了 Cloudflare 访客位置头时，只读取网段内直连代理提供的坐标对。未配置可信客户端 IP 头时，IP 推断使用直连对端地址，该地址从不记录或返回。响应只返回当前请求的可选显示元数据、来源、Provider、精度和 `location_key`，不返回坐标或 IP。`location_key` 由服务端按归一化网格确定性派生的 16 位小写十六进制字符串派生，不直接包含坐标或 IP，同一网格恒定、网格变化时变化，不随 GeoIP 数据库热重载变化；它不是密码学匿名化——网格空间可枚举，仅作为位置作用域身份比较依据，显示字段仅供展示。相同网格共享天气数据缓存，但显示元数据不进入缓存。`GET /api/v1/location` 返回 `schema_version`、位置元数据、可选 `accuracy_radius_km` 和 `location_key`，同样不包含 IP 或坐标。
+服务不读取任意转发头（如 `X-Forwarded-For`）、查询参数或其他位置头；配置了 Cloudflare 访客位置头时，只读取网段内直连代理提供的坐标对。未配置可信客户端 IP 头时，IP 推断使用直连对端地址，该地址从不记录或返回。响应只返回当前请求的可选显示元数据、来源、Provider、精度和 `location_key`，不返回坐标或 IP。`location_key` 由服务端从归一化后的两位小数坐标确定性派生为 16 位小写十六进制字符串，不直接包含坐标或 IP，同一位置恒定、位置变化时变化，不随 GeoIP 数据库热重载变化；它不是密码学匿名化，仅作为位置作用域身份比较依据，显示字段仅供展示。相同位置共享天气数据缓存，但显示元数据不进入缓存。`GET /api/v1/location` 返回 `schema_version`、位置元数据、可选 `accuracy_radius_km` 和 `location_key`，同样不包含 IP 或坐标。
 
 预警响应是同一位置的完整快照，设备应替换旧列表而不是按 ID 增量合并。空列表表示当前无预警；`truncated=true` 表示上游条目超过公开上限。预警默认新鲜 10 分钟，发生上游故障时最多返回 1 小时内且带 `stale=true` 的缓存。
 
@@ -108,11 +108,11 @@ volumes:
 
 ## 中文显示名称本地化
 
-配置 QWeather 后，天气四个接口和 `GET /api/v1/location` 会尽力把显示名称本地化为中文：活动 Provider 通过 GeoAPI 城市搜索（`/geo/v2/city/lookup?location=经度,纬度&number=1&lang=zh`）按归一化 `0.1°` 网格坐标反查，`adm2` 映射为 `city`（缺少时回退到 `name`）、`name` 映射为新增的 `district` 区县字段、`adm1` 映射为 `region`、`tz` 映射为 `timezone`，`country` 保持 ISO 代码。坐标只在网格精度内发送，请求不携带、不记录或返回原始坐标。
+配置 QWeather 后，天气四个接口和 `GET /api/v1/location` 会尽力把显示名称本地化为中文：活动 Provider 通过 GeoAPI 城市搜索（`/geo/v2/city/lookup?location=经度,纬度&number=1&lang=zh`）按归一化后的两位小数坐标反查，`adm2` 映射为 `city`（缺少时回退到 `name`）、`name` 映射为新增的 `district` 区县字段、`adm1` 映射为 `region`、`tz` 映射为 `timezone`，`country` 保持 ISO 代码。坐标以两位小数精度发送，请求不携带、不记录或返回更高精度的原始坐标。
 
 - 这是尽力而为的显示增强：GeoAPI 失败、超时（3 秒）、每设备调用预算（容量 20、每 5 分钟恢复 1）或全局 4 个在途上限耗尽时，响应回退设备头、Cloudflare 头或 GeoLite2 返回的名称，天气可用性不受影响。
 - GeoAPI 数据按 QWeather 许可不缓存、不批量存储；每次请求实时查询，并按次计费。频繁轮询天气接口的设备会持续产生 GeoAPI 调用，请结合设备流量评估费用。
-- `lang=zh` 只保证有中文覆盖的地点返回中文；海外地点可能按官方语言或英文回退。区县边界附近的 `0.1°` 网格反查结果可能与设备实际位置略有偏差。
+- `lang=zh` 只保证有中文覆盖的地点返回中文；海外地点可能按官方语言或英文回退。IP 推断本身只有城市级精度，反查结果可能与设备实际位置略有偏差。
 - `GET /api/v1/location` 仅在本地化成功且确有显示字段被覆盖时返回可选 `localization` 对象（QWeather 与官网链接）；展示位置名称的设备/界面必须可见署名，天气响应的 QWeather 归属在 `source` 中。
 - 本地化失败不会打开天气熔断：GeoAPI 返回的 `401/403` 或 `429`（HTTP 状态或响应体代码）只回退名称，不影响天气可用性。
 - 管理界面 QWeather 验证成功后 `tested_capabilities` 会额外包含 `geo_lookup`（仅当该位置反查成功且确有显示字段被覆盖）。

@@ -262,7 +262,7 @@
 			  "source": { "type": "string", "const": "browser" },
 			  "provider": { "type": "string", "const": "browser" },
 			  "precision": { "type": "string", "const": "coarse" },
-			  "location_key": { "type": "string", "pattern": "^[a-f0-9]{16}$", "maxLength": 16, "description": "Opaque grid-scope identity derived from the normalized 0.1-degree grid; never contains coordinates or the client IP." }
+			  "location_key": { "type": "string", "pattern": "^[a-f0-9]{16}$", "maxLength": 16, "description": "Opaque scope identity derived from the normalized two-decimal coordinates; never contains coordinates or the client IP." }
             }
           },
           "tested_at": { "type": "string", "format": "date-time" },

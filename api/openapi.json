@@ -418,7 +418,7 @@
         "name": "X-MT-Location-Latitude",
         "in": "header",
         "required": false,
-        "description": "Request latitude; validated and normalized by the server to a 0.1 degree grid. All three required headers must be present together; when all are absent the server infers a coarse location from the client IP.",
+        "description": "Request latitude; validated and rounded by the server to two-decimal precision. All three required headers must be present together; when all are absent the server infers a location from the client IP.",
         "schema": {
           "type": "string",
           "maxLength": 32
@@ -428,7 +428,7 @@
         "name": "X-MT-Location-Longitude",
         "in": "header",
         "required": false,
-        "description": "Request longitude; validated and normalized by the server to a 0.1 degree grid. All three required headers must be present together; when all are absent the server infers a coarse location from the client IP.",
+        "description": "Request longitude; validated and rounded by the server to two-decimal precision. All three required headers must be present together; when all are absent the server infers a location from the client IP.",
         "schema": {
           "type": "string",
           "maxLength": 32
@@ -438,7 +438,7 @@
         "name": "X-MT-Location-Provider",
         "in": "header",
         "required": false,
-        "description": "Lowercase identifier declaring the source of the request location. All three required headers must be present together; when all are absent the server infers a coarse location from the client IP.",
+        "description": "Lowercase identifier declaring the source of the request location. All three required headers must be present together; when all are absent the server infers a location from the client IP.",
         "schema": {
           "type": "string",
           "pattern": "^[a-z0-9][a-z0-9._-]{0,31}$"
@@ -499,7 +499,7 @@
         }
       },
       "LocationRateLimited": {
-        "description": "The authenticated device changed location grids too frequently",
+        "description": "The authenticated device changed location too frequently",
         "headers": {
           "Retry-After": {
             "schema": {
@@ -874,7 +874,7 @@
             "type": "string",
             "pattern": "^[a-f0-9]{16}$",
             "maxLength": 16,
-            "description": "Opaque scope identity derived deterministically by the server from the normalized 0.1-degree grid. It does not contain coordinates or the client IP, is stable for the same grid, and changes when the grid changes. Devices should compare this value to detect location-scope changes; display fields are for presentation only."
+            "description": "Opaque scope identity derived deterministically by the server from the normalized two-decimal coordinates. It does not contain coordinates or the client IP, is stable for the same location, and changes when the location changes. Devices should compare this value to detect location-scope changes; display fields are for presentation only."
           }
         }
       },

@@ -32,7 +32,7 @@ func TestResolveReturnsNormalizedDisplaySafeLocation(t *testing.T) {
 		t.Fatal(err)
 	}
 	point := resolved.Point
-	if point.Latitude != 22.5 || point.Longitude != 114.1 ||
+	if point.Latitude != 22.54 || point.Longitude != 114.06 ||
 		point.City != "Shenzhen" || point.Region != "Guangdong" ||
 		point.Country != "CN" || point.Timezone != "Asia/Shanghai" ||
 		point.Source != "ip" || point.Provider != "maxmind" || point.Precision != "coarse" {

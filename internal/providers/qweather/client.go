@@ -214,8 +214,8 @@ func (c *Client) Close() error {
 func (c *Client) request(ctx context.Context, path string,
 	point location.Point) ([]byte, error) {
 	query := url.Values{}
-	query.Set("location", strconv.FormatFloat(point.Longitude, 'f', 1, 64)+","+
-		strconv.FormatFloat(point.Latitude, 'f', 1, 64))
+	query.Set("location", strconv.FormatFloat(point.Longitude, 'f', 2, 64)+","+
+		strconv.FormatFloat(point.Latitude, 'f', 2, 64))
 	query.Set("lang", c.language)
 	query.Set("unit", c.unit)
 	return c.requestWithQuery(ctx, path, query, true)

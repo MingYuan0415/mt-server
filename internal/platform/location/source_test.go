@@ -49,7 +49,7 @@ func TestSourceFallsBackToIPInference(t *testing.T) {
 	request.RemoteAddr = "203.0.113.9:1234"
 	point, gotResolved, err := source.EffectivePoint(request)
 	if err != nil || point.Source != "ip" || point.City != "IP City" ||
-		point.Latitude != 22.5 || point.Longitude != 114.1 {
+		point.Latitude != 22.54 || point.Longitude != 114.06 {
 		t.Fatalf("unexpected fallback result %#v %v", point, err)
 	}
 	if gotResolved.AccuracyKm == nil || *gotResolved.AccuracyKm != 50 {

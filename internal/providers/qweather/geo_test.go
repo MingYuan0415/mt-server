@@ -15,7 +15,7 @@ import (
 	"github.com/MingYuan0415/mt-server/internal/platform/location"
 )
 
-func TestLocalizeQueriesCityLookupWithGridCoordinates(t *testing.T) {
+func TestLocalizeQueriesCityLookupWithNormalizedCoordinates(t *testing.T) {
 	privateKeyPEM, _ := testPrivateKey(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/geo/v2/city/lookup" {
@@ -24,7 +24,7 @@ func TestLocalizeQueriesCityLookupWithGridCoordinates(t *testing.T) {
 		if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
 			t.Error("missing bearer token")
 		}
-		if r.URL.Query().Get("location") != "114.1,22.5" ||
+		if r.URL.Query().Get("location") != "114.10,22.50" ||
 			r.URL.Query().Get("number") != "1" ||
 			r.URL.Query().Get("lang") != "zh" {
 			t.Errorf("unexpected query %q", r.URL.RawQuery)

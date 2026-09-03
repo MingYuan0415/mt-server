@@ -30,7 +30,7 @@ The v1 API is no longer strictly additive: the fixed `X-MT-Location-*` headers b
 
 Never commit or log real hostnames, public or private IP addresses used by the deployment, coordinates, QWeather identifiers, tunnel identifiers, credentials, tokens, JWTs, private keys, or complete Authorization headers. Public examples use reserved documentation domains and addresses only.
 
-Application secrets live only in the private state volume. Production source ports remain unexposed. Authenticated devices supply locations only through the fixed `X-MT-Location-*` contract (all required headers together or none) or through the configured trusted-proxy IP inference; preserve authentication-first parsing, strict validation, privacy-grid normalization, per-device grid-change limiting, the ban on coordinate/IP logging or response fields, and the rule that forwarded client-IP headers are honored only from peers in `MT_TRUSTED_CLIENT_IP_NETS`. Do not add query-parameter tokens or coordinates.
+Application secrets live only in the private state volume. Production source ports remain unexposed. Authenticated devices supply locations only through the fixed `X-MT-Location-*` contract (all required headers together or none) or through the configured trusted-proxy IP inference; preserve authentication-first parsing, strict validation, two-decimal coordinate normalization (QWeather accepts at most two decimals), per-device location-change limiting, the ban on coordinate/IP logging or response fields, and the rule that forwarded client-IP headers are honored only from peers in `MT_TRUSTED_CLIENT_IP_NETS`. Do not add query-parameter tokens or coordinates.
 
 ## Style And Tests
 

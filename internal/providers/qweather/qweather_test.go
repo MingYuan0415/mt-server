@@ -160,7 +160,7 @@ func TestClientFetchesAndNormalizesAllDatasets(t *testing.T) {
 		if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
 			t.Error("missing bearer token")
 		}
-		if r.URL.Query().Get("location") != "120.1,30.2" ||
+		if r.URL.Query().Get("location") != "120.10,30.20" ||
 			r.URL.Query().Get("lang") != "zh" || r.URL.Query().Get("unit") != "m" {
 			t.Errorf("unexpected query %q", r.URL.RawQuery)
 		}

@@ -605,7 +605,7 @@ func TestModuleDoesNotCacheRequestMetadata(t *testing.T) {
 		}
 	}
 	if fetches.Load() != 1 {
-		t.Fatalf("same grid fetched provider %d times", fetches.Load())
+		t.Fatalf("same location fetched provider %d times", fetches.Load())
 	}
 }
 

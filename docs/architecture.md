@@ -32,8 +32,8 @@ Bearer 认证
   -> 解析 X-MT-Location-* 请求头（全有或全无）
   -> 无位置头时读取可信直连代理的 Cloudflare 访客位置头
   -> 仍无位置时按可信客户端 IP 推断位置
-  -> 校验并归一化到 0.1 度网格，派生 location_key
-  -> 按 DeviceID 限制位置网格跳变
+  -> 校验并把坐标归一化到两位小数精度，派生 location_key
+  -> 按 DeviceID 限制位置跳变
   -> 并行：查询或命中 QWeather 天气缓存 + 尽力反查中文显示名称
   -> 返回当前请求的显示元数据与 location_key，不返回坐标或 IP
 ```
@@ -42,11 +42,11 @@ Bearer 认证
 
 省略位置头时，若配置了 `MT_CLOUDFLARE_LOCATION_HEADERS=true`，`internal/platform/location` 的 Cloudflare 解析器只从 `MT_TRUSTED_CLIENT_IP_NETS` 内直连代理读取 `CF-IPLatitude`/`CF-IPLongitude` 坐标对（城市等为可选显示元数据），返回 `source: "ip"`、`provider: "cloudflare"`、`precision: "coarse"` 的归一化点；坐标对出现但缺失、重复或非法时直接 `location_unavailable`，不降级。若进程配置了 `MT_GEOIP_DB`，未出现 Cloudflare 坐标对时 `internal/providers/geoip` 会查询本地 GeoLite2 City 数据库，返回 `source: "ip"`、`precision: "coarse"` 的归一化点；该结果只存在内存，不落盘。可信客户端 IP 头是可选配置：配置 `MT_TRUSTED_CLIENT_IP_HEADER` 与 `MT_TRUSTED_CLIENT_IP_NETS` 时，客户端 IP 只从网段内直连代理提供的该头读取，其余请求使用连接对端地址；头值严格解析为单个 IP，多值或非法值直接拒绝。未配置可信头时使用直连对端地址，该地址从不记录或返回。私有、环回、链路本地、CGNAT 和特殊用途网段不可定位。MMDB 文件由外部 `geoipupdate` 原子替换，Store 每 5 分钟检测文件变化并热重载。
 
-归一化完成后，`location.Point.Key` 由规范网格字符串（`"lat,lon"` 一位小数）的 FNV-1a 64 哈希派生成 16 位小写十六进制 `location_key`。它不直接包含坐标或 IP，同一网格恒定、网格变化时变化，不随 GeoIP 热重载变化；该值无密钥、网格空间可枚举，是稳定的不透明作用域标识而非密码学匿名化。天气缓存键与限速键仍使用规范网格字符串，`location_key` 只是同一网格的额外派生，不改变缓存和限速行为。
+归一化完成后，`location.Point.Key` 由规范坐标字符串（`"lat,lon"` 两位小数）的 FNV-1a 64 哈希派生成 16 位小写十六进制 `location_key`。它不直接包含坐标或 IP，同一位置恒定、位置变化时变化，不随 GeoIP 热重载变化；该值无密钥，是稳定的不透明作用域标识而非密码学匿名化。天气缓存键与限速键同样使用规范坐标字符串，`location_key` 只是同一位置的额外派生，不改变缓存和限速行为。
 
-Bearer token 持有者可以声明任意合法位置。每个 DeviceID 的位置变更令牌桶容量为 4，每 5 分钟恢复 1 次；同一网格不计数，超限返回 `429`。内存 LRU 最多保存 64 个位置，天气数据按网格、种类、语言和单位隔离；显示元数据始终来自当前请求，不跨请求缓存。
+Bearer token 持有者可以声明任意合法位置。每个 DeviceID 的位置变更令牌桶容量为 4，每 5 分钟恢复 1 次；同一位置不计数，超限返回 `429`。内存 LRU 最多保存 64 个位置，天气数据按归一化位置、种类、语言和单位隔离；显示元数据始终来自当前请求，不跨请求缓存。
 
-天气与位置接口会尽力把显示名称本地化为中文：活动 QWeather Provider 通过 `GET /geo/v2/city/lookup`（`number=1`、`lang=zh`，仅使用归一化后的 `0.1°` 网格坐标）反查地点，把 `adm2` 映射到 `city`（缺少时回退到 `name`）、`name` 映射到新增的 `district` 区县字段、`adm1` 映射到 `region`、`tz` 映射到 `timezone`；`country` 保持 ISO 代码不变。查询成功才覆盖显示字段，`source`、`provider`、`precision`、`location_key` 与坐标获取语义不变。GeoAPI 数据按 QWeather 许可不做缓存或持久化：每次请求都实时查询，受每设备令牌桶（容量 20、每 5 分钟恢复 1）和全局 4 个在途上限约束；预算耗尽、上游失败或超过 3 秒预算时回退请求自身的元数据。天气查询与本地化查询并行执行，天气失败时先取消并等待本地化协程结束，避免运行时替换期间使用已关闭的 Provider。`GET /api/v1/location` 仅在本地化成功且确有显示字段被覆盖时返回可选 `localization` 归属对象（QWeather 及官网链接），客户端展示位置名称时必须可见署名；天气响应的 QWeather 归属已在 `source` 中。海外地点按 QWeather 多语言回退规则可能返回当地官方语言或英文名称。
+天气与位置接口会尽力把显示名称本地化为中文：活动 QWeather Provider 通过 `GET /geo/v2/city/lookup`（`number=1`、`lang=zh`，仅使用归一化后的两位小数坐标）反查地点，把 `adm2` 映射到 `city`（缺少时回退到 `name`）、`name` 映射到新增的 `district` 区县字段、`adm1` 映射到 `region`、`tz` 映射到 `timezone`；`country` 保持 ISO 代码不变。查询成功才覆盖显示字段，`source`、`provider`、`precision`、`location_key` 与坐标获取语义不变。GeoAPI 数据按 QWeather 许可不做缓存或持久化：每次请求都实时查询，受每设备令牌桶（容量 20、每 5 分钟恢复 1）和全局 4 个在途上限约束；预算耗尽、上游失败或超过 3 秒预算时回退请求自身的元数据。天气查询与本地化查询并行执行，天气失败时先取消并等待本地化协程结束，避免运行时替换期间使用已关闭的 Provider。`GET /api/v1/location` 仅在本地化成功且确有显示字段被覆盖时返回可选 `localization` 归属对象（QWeather 及官网链接），客户端展示位置名称时必须可见署名；天气响应的 QWeather 归属已在 `source` 中。海外地点按 QWeather 多语言回退规则可能返回当地官方语言或英文名称。
 
 `GET /api/v1/location` 使用同一位置解析逻辑，返回城市、可选区县、地区、国家、时区、可选 `accuracy_radius_km` 和 `location_key`，不返回 IP 或坐标。天气接口在推断不可用时返回 `503 location_unavailable`。
 
@@ -67,7 +67,7 @@ QWeather 更新会创建新运行时并清空旧缓存；失败时保留原状�
 
 实时、逐小时、逐日和预警分别缓存。预警新鲜期为 10 分钟，陈旧上限为 1 小时；响应是完整快照，空列表代表当前无预警。供应商字段在适配层规范化为稳定等级、状态和 CAP 紧急度/确定性，原始结构不会越过适配层。
 
-已认证管理接口可以读取进程内诊断快照，包括供应商阻断状态和按天气种类聚合的缓存计数。诊断读取不调用上游，且不按设备、令牌、位置、网格或 IP 建立维度；进程重启或 QWeather 运行时替换会重置这些数据。
+已认证管理接口可以读取进程内诊断快照，包括供应商阻断状态和按天气种类聚合的缓存计数。诊断读取不调用上游，且不按设备、令牌、位置或 IP 建立维度；进程重启或 QWeather 运行时替换会重置这些数据。
 
 ## 管理安全
 

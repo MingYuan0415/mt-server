@@ -32,10 +32,9 @@ const geoLookupPath = "/geo/v2/city/lookup"
 
 // Localize resolves Simplified-Chinese display names for a normalized point
 // through the GeoAPI city-lookup endpoint. The request uses only the
-// privacy-reduced grid coordinates, never the raw client location, and shares
-// the provider-wide concurrency limit with weather fetches. Failures must be
-// treated as best-effort by callers, which fall back to the original display
-// metadata.
+// normalized two-decimal coordinates, and shares the provider-wide
+// concurrency limit with weather fetches. Failures must be treated as
+// best-effort by callers, which fall back to the original display metadata.
 func (c *Client) Localize(ctx context.Context, point location.Point) (location.LocalizedMetadata, error) {
 	if err := c.acquire(ctx); err != nil {
 		return location.LocalizedMetadata{}, err
@@ -43,8 +42,8 @@ func (c *Client) Localize(ctx context.Context, point location.Point) (location.L
 	defer func() { <-c.slots }()
 
 	query := url.Values{}
-	query.Set("location", strconv.FormatFloat(point.Longitude, 'f', 1, 64)+","+
-		strconv.FormatFloat(point.Latitude, 'f', 1, 64))
+	query.Set("location", strconv.FormatFloat(point.Longitude, 'f', 2, 64)+","+
+		strconv.FormatFloat(point.Latitude, 'f', 2, 64))
 	query.Set("number", "1")
 	query.Set("lang", c.language)
 	body, err := c.requestWithQuery(ctx, geoLookupPath, query, false)
