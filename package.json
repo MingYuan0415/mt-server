@@ -10,7 +10,7 @@
     "test:web": "playwright test"
   },
   "devDependencies": {
-    "@playwright/test": "1.62.1",
+    "@playwright/test": "1.64.0",
     "@redocly/cli": "2.43.2"
   }
 }
